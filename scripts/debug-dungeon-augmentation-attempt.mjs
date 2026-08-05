@@ -7,6 +7,7 @@ import {
   createIndustrialBaseDraft,
 } from '../src/dungeon-augmentation/IndustrialDraftAdapter.js';
 import {
+  augmentDungeonDraft,
   createDungeonSelectionBag,
   dungeonSelectionBagCandidates,
   DUNGEON_AUGMENTATION_PROFILES,
@@ -16,6 +17,16 @@ import {
   normalizeRouteNetworkGrant,
   planRouteNetwork,
 } from '../src/dungeon-augmentation/index.js';
+
+function exitIncompleteDiagnostic() {
+  console.error(JSON.stringify({
+    schema: 'dungeon-augmentation-debug-result/v1',
+    result: 'incomplete',
+    reason: 'explicit-diagnostic-checkpoint',
+  }));
+  process.exitCode = 2;
+  process.exit();
+}
 
 function isGraphOnlySupplementConnection(plan) {
   return Boolean(
@@ -435,6 +446,20 @@ function createPlayableAlphaSmokeSummary(dungeon) {
 const candidateSummaryRequested = process.argv.includes('--candidate-summary');
 const candidateHistogramRequested = process.argv.includes('--candidate-histogram');
 const candidateHistogramRecords = [];
+let plannerDiagnosticSink = null;
+const unsupportedPlannerShortCircuitArguments = process.argv.filter((argument) => (
+  argument === '--stop-on-success'
+    || argument.startsWith('--stop-after-candidate=')
+    || argument.startsWith('--stop-after-stage=')
+    || argument.startsWith('--stop-after-stage-count=')
+));
+if (unsupportedPlannerShortCircuitArguments.length > 0) {
+  throw new Error(
+    `Planner short-circuit diagnostics were removed; run the bounded planner to completion: ${
+      unsupportedPlannerShortCircuitArguments.join(', ')
+    }`,
+  );
+}
 
 function summarizeCandidateHistogram(records) {
   const byGrantId = new Map();
@@ -492,63 +517,21 @@ function summarizeCandidateHistogram(records) {
 }
 
 if (candidateSummaryRequested) {
-  globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ = true;
   const candidateFilter = process.argv.find((argument) => argument.startsWith('--filter='))
     ?.slice('--filter='.length) ?? 'conveyorRoom_bossRoom';
-  globalThis.__DUNGEON_AUGMENTATION_ROUTE_PLANNING_DEBUG_FILTER__ = candidateFilter;
-  globalThis.__DUNGEON_AUGMENTATION_ROUTE_PLANNING_STAGE_FILTER__ = process.argv
+  const stageFilter = process.argv
     .find((argument) => argument.startsWith('--stage-filter='))
     ?.slice('--stage-filter='.length) ?? '';
-  globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG_SKIPS__ = process.argv
-    .find((argument) => argument.startsWith('--debug-skip-candidates='))
-    ?.slice('--debug-skip-candidates='.length)
-    .split(',')
-    .map((token) => {
-      const match = token.match(/^(.*)@(\d+)(?:-(\d+))?$/);
-      if (!match) return null;
-      const firstOrdinal = Number.parseInt(match[2], 10);
-      const lastOrdinal = Number.parseInt(match[3] ?? match[2], 10);
-      return {
-        grantSuffix: match[1],
-        firstOrdinal: Math.min(firstOrdinal, lastOrdinal),
-        lastOrdinal: Math.max(firstOrdinal, lastOrdinal),
-      };
-    })
-    .filter(Boolean) ?? [];
-  globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG_PREFERRED_GRANT__ = process.argv
-    .find((argument) => argument.startsWith('--debug-prefer-grant='))
-    ?.slice('--debug-prefer-grant='.length) ?? '';
-  const stopAfterCandidateArgument = process.argv.find((argument) => (
-    argument.startsWith('--stop-after-candidate=')
-  ));
-  const stopAfterCandidateOrdinal = Number.parseInt(
-    stopAfterCandidateArgument?.slice('--stop-after-candidate='.length) ?? '',
-    10,
-  );
   const includeStageDiagnostics = process.argv.includes('--stages');
   const stagesOnly = process.argv.includes('--stages-only');
   const briefCandidateSummary = process.argv.includes('--brief-candidate-summary');
-  const stopAfterStage = process.argv.find((argument) => (
-    argument.startsWith('--stop-after-stage=')
-  ))?.slice('--stop-after-stage='.length) ?? null;
-  const stopAfterStageCount = Math.max(1, Number.parseInt(
-    process.argv.find((argument) => argument.startsWith('--stop-after-stage-count='))
-      ?.slice('--stop-after-stage-count='.length) ?? '1',
-    10,
-  ) || 1);
-  let matchingStageCount = 0;
-  console.error = (value) => {
+  const observeCandidateDiagnostic = (value) => {
     try {
       const record = JSON.parse(String(value));
       if (record.stage) {
         if (includeStageDiagnostics
           && String(record.grantId ?? '').includes(candidateFilter)) {
           console.log(JSON.stringify(record));
-        }
-        if (stopAfterStage === String(record.stage)
-          && String(record.grantId ?? '').includes(candidateFilter)) {
-          matchingStageCount += 1;
-          if (matchingStageCount >= stopAfterStageCount) process.exit(0);
         }
         return;
       }
@@ -676,29 +659,42 @@ if (candidateSummaryRequested) {
           ? undefined
           : record.context?.physicalSpineEdgeDiagnostics ?? null,
       }));
-      if (process.argv.includes('--stop-on-success') && record.error == null) {
-        process.exit(0);
-      }
-      if (Number.isSafeInteger(stopAfterCandidateOrdinal)
-        && Number(record.candidateOrdinal) === stopAfterCandidateOrdinal) {
-        process.exit(0);
-      }
     } catch {
-      // Ignore unrelated diagnostic output in this temporary repro helper.
+      // The typed planner sink only supplies JSON-serializable observations.
     }
   };
+  plannerDiagnosticSink = {
+    schema: 'dungeon-augmentation-planner-diagnostic-sink/v1',
+    maximumRecords: 512,
+    includeStages: includeStageDiagnostics,
+    includeTimings: true,
+    includeDetails: !briefCandidateSummary,
+    observe(record) {
+      if (record.kind === 'route-network-stage'
+        && stageFilter
+        && record.stage !== stageFilter) return;
+      observeCandidateDiagnostic(JSON.stringify({
+        ...record,
+        planningElapsedMs: record.timing?.elapsedMs ?? null,
+        planningPhaseTimings: record.timing?.physicalTiming ?? null,
+        plannedNodeCount: record.details?.plannedNodeCount ?? 0,
+        substantiveModuleCount: record.details?.substantiveModuleCount ?? null,
+        context: record.details?.context ?? null,
+      }));
+    },
+  };
 } else if (candidateHistogramRequested) {
-  globalThis.__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ = true;
-  const originalConsoleError = console.error.bind(console);
-  console.error = (value, ...remainingValues) => {
-    try {
-      const record = JSON.parse(String(value));
-      if (!record.stage && record.grantId && Number.isSafeInteger(record.candidateOrdinal)) {
-        candidateHistogramRecords.push(record);
-      }
-    } catch {
-      originalConsoleError(value, ...remainingValues);
-    }
+  plannerDiagnosticSink = {
+    schema: 'dungeon-augmentation-planner-diagnostic-sink/v1',
+    maximumRecords: 512,
+    includeTimings: true,
+    observe(record) {
+      if (record.kind !== 'route-network-candidate') return;
+      candidateHistogramRecords.push({
+        ...record,
+        planningElapsedMs: record.timing?.elapsedMs ?? null,
+      });
+    },
   };
 }
 
@@ -725,6 +721,7 @@ const injectedRouteNetworkConflictExclusions = routeConflictExclusionsBase64Argu
     ).toString('utf8'))
   : null;
 const generator = new DungeonGenerator({
+  offlineAugmentationPlanner: augmentDungeonDraft,
   random: () => seeded.next(),
   difficulty: 1,
   augmentationProfileId: 'industrial-supplement-preview-v4',
@@ -736,6 +733,9 @@ const generator = new DungeonGenerator({
     ? requestedAttemptLimit
     : undefined,
 });
+if (plannerDiagnosticSink) {
+  generator._augmentationPlannerDiagnosticSink = plannerDiagnosticSink;
+}
 if (Array.isArray(injectedRouteNetworkConflictExclusions)) {
   generator.augmentationRouteNetworkConflictExclusions =
     injectedRouteNetworkConflictExclusions;
@@ -827,7 +827,7 @@ if (process.argv.includes('--stop-on-first-rejected-room-connectivity')) {
           };
         }),
       }, null, 2));
-      process.exit(0);
+      exitIncompleteDiagnostic();
     }
     return validation;
   };
@@ -885,7 +885,7 @@ if (process.argv.includes('--stop-on-first-rejected-drop-space')
           } : { id, missing: true };
         }),
       }, null, 2));
-      process.exit(0);
+      exitIncompleteDiagnostic();
     }
     return validation;
   };
@@ -997,7 +997,7 @@ if (planningInputSummaryRequested) {
           .map(({ distanceMeters }) => Number(distanceMeters)),
       })),
     }));
-    if (process.argv.includes('--stop-before-planning')) process.exit(0);
+    if (process.argv.includes('--stop-before-planning')) exitIncompleteDiagnostic();
     return originalPlanIndustrialDungeonAugmentation(planningInput);
   };
 }
@@ -1175,7 +1175,7 @@ if (process.argv.includes('--stop-on-drop-space-wall-runs')) {
           : [],
         edges,
       }, null, 2));
-      process.exit(0);
+      exitIncompleteDiagnostic();
     }
     return runs;
   };
@@ -1492,7 +1492,7 @@ if (process.argv.includes('--playable-alpha')
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   if (process.argv.includes('--connector-entrance-failures')) {
     const attempts = dungeon.augmentationDiagnostics?.rejectedOverlay?.attempts ?? [];
@@ -1505,7 +1505,7 @@ if (process.argv.includes('--playable-alpha')
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   if (process.argv.includes('--failed-physical')) {
     console.log(JSON.stringify({
@@ -1522,7 +1522,7 @@ if (process.argv.includes('--playable-alpha')
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   if (process.argv.includes('--release-errors-only')) {
     const overlayPlan = dungeon.augmentationOverlayPlan ?? null;
@@ -1744,7 +1744,7 @@ if (process.argv.includes('--playable-alpha')
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   const smoke = createPlayableAlphaSmokeSummary(dungeon);
   const geometryIntegrity = createGeometryIntegritySummary(generator, dungeon);
@@ -1829,7 +1829,7 @@ if (process.argv.includes('--playable-alpha')
   }, null, 2));
   generator._disposeGeneratedDungeonCandidate(dungeon);
   texture.dispose();
-  process.exit(0);
+  exitIncompleteDiagnostic();
 }
 
 const profileId = generator.augmentationProfileId;
@@ -1909,6 +1909,7 @@ if (singleGrantPlanArgument) {
   )[0];
   const singleGrantPlanningStartedAt = performance.now();
   const result = planRouteNetwork({
+    collectDetailedPlannerTelemetry: true,
     region,
     grant,
     operationOrdinal: 5,
@@ -2034,7 +2035,7 @@ if (singleGrantPlanArgument) {
   }, null, 2));
   generator._disposeGeneratedDungeonCandidate(base.dungeon);
   texture.dispose();
-  process.exit(0);
+  exitIncompleteDiagnostic();
 }
 const requestedGrant = process.argv.find((argument) => argument.startsWith('--grant='))
   ?.slice('--grant='.length) ?? 'enemyNest_keycardRoom';
@@ -2107,7 +2108,7 @@ if (process.argv.includes('--grants-only')) console.log(JSON.stringify(
 if (process.argv.includes('--grants-only')) {
   generator._disposeGeneratedDungeonCandidate(base.dungeon);
   texture.dispose();
-  process.exit(0);
+  exitIncompleteDiagnostic();
 }
 if (process.argv.includes('--host-only')) console.log(JSON.stringify({
   rooms: base.dungeon.rooms
@@ -2149,7 +2150,7 @@ if (process.argv.includes('--host-only')) console.log(JSON.stringify({
 if (process.argv.includes('--host-only')) {
   generator._disposeGeneratedDungeonCandidate(base.dungeon);
   texture.dispose();
-  process.exit(0);
+  exitIncompleteDiagnostic();
 }
 generator.augmentationProfileId = profileId;
 let cursor = 0;
@@ -2253,7 +2254,7 @@ if (process.argv.includes('--plan-only')) {
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   const edgeBlockerArgument = process.argv.find((argument) => (
     argument.startsWith('--edge-blockers=')
@@ -2327,13 +2328,13 @@ if (process.argv.includes('--plan-only')) {
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   if (process.argv.includes('--diagnostics-only')) {
     console.log(JSON.stringify(planned?.diagnostics ?? null, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   if (process.argv.includes('--compact-failure-summary')) {
     const error = planned?.diagnostics?.errors?.[0] ?? null;
@@ -2433,7 +2434,7 @@ if (process.argv.includes('--plan-only')) {
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   if (process.argv.includes('--failure-summary')) {
     const error = planned?.diagnostics?.errors?.[0] ?? null;
@@ -2539,7 +2540,7 @@ if (process.argv.includes('--plan-only')) {
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   const overlayPlan = planned?.result?.overlayPlan ?? null;
   if (process.argv.includes('--transfer-summary')) {
@@ -2567,7 +2568,7 @@ if (process.argv.includes('--plan-only')) {
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   if (process.argv.includes('--physical-summary')) {
     const requestedSegment = process.argv.find((argument) => argument.startsWith('--segment='))
@@ -2636,7 +2637,7 @@ if (process.argv.includes('--plan-only')) {
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   const elevationSummary = process.argv.includes('--elevation-summary') && overlayPlan
     ? (overlayPlan.operations ?? []).map((operation) => {
@@ -2734,7 +2735,7 @@ if (process.argv.includes('--plan-only')) {
   }, null, 2));
   generator._disposeGeneratedDungeonCandidate(base.dungeon);
   texture.dispose();
-  process.exit(0);
+  exitIncompleteDiagnostic();
 }
 
 try {
@@ -2905,7 +2906,7 @@ try {
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(dungeon, base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   if (process.argv.includes('--failed-rooms-only')
     || process.argv.includes('--direct-failed-rooms-only')) {
@@ -3012,7 +3013,7 @@ try {
     }, null, 2));
     generator._disposeGeneratedDungeonCandidate(dungeon, base.dungeon);
     texture.dispose();
-    process.exit(0);
+    exitIncompleteDiagnostic();
   }
   console.log(JSON.stringify({
     status: dungeon.augmentationStatus,
@@ -3166,6 +3167,7 @@ try {
   }, null, 2));
   generator._disposeGeneratedDungeonCandidate(dungeon, base.dungeon);
 } catch (error) {
+  process.exitCode = 1;
   const decision = error.augmentationDiagnostics?.decisions?.at(-1);
   const context = decision?.context ?? {};
   const rawDiagnostics = error.augmentationDiagnostics ?? null;

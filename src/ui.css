@@ -444,7 +444,7 @@ button:focus-visible {
   gap: 0.75rem;
 }
 
-.dungeon-augmentation-loading-actions[hidden] {
+.dungeon-augmentation-loading-actions button[hidden] {
   display: none;
 }
 

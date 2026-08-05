@@ -1007,7 +1007,13 @@ function validateRouteNetworkSocketBindings(elements, overlayPlan = null) {
   for (const operation of elements.operations.filter((entry) => operationType(entry) === 'routeNetwork')) {
     const parentAnchoredForest = overlayPlan?.schema
       === 'ruindivex-dungeon-augmentation-overlay/v2'
-      && Number(overlayPlan?.profileRevision) === 5
+      && (
+        Number(overlayPlan?.profileRevision) === 5
+        || (
+          Number(overlayPlan?.profileRevision) === 6
+          && overlayPlan?.generationMode === 'authored-artifact'
+        )
+      )
       && operation?.realizationMode === 'parent-anchored-forest';
     if (operation?.realizationMode != null && !parentAnchoredForest) {
       throw new DungeonSupplementAssemblyError(

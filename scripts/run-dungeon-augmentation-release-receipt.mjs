@@ -12,6 +12,7 @@ import {
   assertCleanReleaseProvenance,
   assertMatchingReleaseProvenance,
   createReleaseProvenance,
+  createReleaseReceiptEnvironment,
   createReleaseSuiteReceipt,
   readJson,
   validateReleaseSuiteReceipt,
@@ -62,6 +63,7 @@ try {
 }
 
 const contract = RELEASE_SUITE_CONTRACTS[suiteId];
+const releaseCommandEnvironment = createReleaseReceiptEnvironment(process.env);
 const commandResults = [];
 let priorCommandFailed = false;
 for (const command of contract.commands) {
@@ -82,7 +84,7 @@ for (const command of contract.commands) {
   const startedAt = performance.now();
   const result = spawnSync(process.execPath, [...command.args], {
     cwd: projectRoot,
-    env: process.env,
+    env: releaseCommandEnvironment,
     stdio: 'inherit',
     windowsHide: true,
   });

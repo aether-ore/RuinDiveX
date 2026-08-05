@@ -5,7 +5,10 @@ import { DungeonController } from './DungeonController.js';
 import { DungeonConnectorLiftRuntime } from './DungeonConnectorLiftRuntime.js';
 import { DungeonConnectorTrapRuntime } from './DungeonConnectorTrapRuntime.js';
 import { DungeonConnectorTrapVisualFactory } from './DungeonConnectorTrapVisualFactory.js';
-import { DungeonGenerator } from './DungeonGenerator.js';
+import {
+  DungeonAugmentationIncompatibleContentError,
+  DungeonGenerator,
+} from './DungeonGenerator.js';
 import {
   INDUSTRIAL_SUPPLEMENT_PREVIEW_PROFILE_ID,
   INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID,
@@ -18,8 +21,12 @@ import {
 } from './dungeon-augmentation/identity.js';
 import { hashCanonicalValue } from './dungeon-augmentation/canonical.js';
 import {
-  createDungeonAugmentationBrowserPlannerSession,
-} from './dungeon-augmentation/BrowserPlannerWorkerClient.js';
+  INDUSTRIAL_V4_AUTHORED_GENERATION_MODE,
+  loadIndustrialV4AuthoredArtifact,
+} from './dungeon-augmentation/authored/IndustrialV4AuthoredArtifact.js';
+import {
+  prepareIndustrialV4AuthoredAssets,
+} from './dungeon-augmentation/authored/AuthoredV4AssetPreparation.js';
 import {
   AdaptiveDungeonQualityController,
   DUNGEON_QUALITY_MODES,
@@ -1153,24 +1160,39 @@ function throwIfDungeonBuildAborted(signal = null) {
   if (signal?.aborted) throw dungeonBuildAbortError(signal);
 }
 
-function summarizeDungeonWorkerPassDiagnostics(passes = []) {
-  const workerPasses = passes.map((pass) => ({ ...pass }));
-  const total = (field) => workerPasses.reduce(
-    (sum, pass) => sum + Math.max(0, Number(pass[field]) || 0),
-    0,
-  );
-  return {
-    workerPasses,
-    workerInputCloneDispatchTimeMs: total('inputCloneDispatchTimeMs'),
-    workerExecutionTimeMs: total('workerExecutionTimeMs'),
-    workerOutputCloneAndDeliveryTimeMs: total('outputCloneAndDeliveryTimeMs'),
-    workerRoundTripTimeMs: total('totalRoundTripTimeMs'),
-  };
-}
-
 const PREPARED_INITIAL_DUNGEON_SCHEMA = 'prepared-initial-dungeon/v1';
 
-function createDungeonAugmentationLoadingState(container) {
+export function createOwnedDungeonBuildCancellation(externalSignal = null) {
+  const controller = new AbortController();
+  let cleanupCompleted = false;
+  let resolveCleanup;
+  const cleanupPromise = new Promise((resolve) => {
+    resolveCleanup = resolve;
+  });
+  const forwardAbort = () => {
+    if (!controller.signal.aborted) controller.abort(externalSignal?.reason);
+  };
+  if (externalSignal?.aborted) forwardAbort();
+  else externalSignal?.addEventListener?.('abort', forwardAbort, { once: true });
+  const finishCleanup = () => {
+    if (cleanupCompleted) return;
+    cleanupCompleted = true;
+    externalSignal?.removeEventListener?.('abort', forwardAbort);
+    resolveCleanup();
+  };
+  return Object.freeze({
+    signal: controller.signal,
+    async cancelAndWait(reason = new Error('Dungeon build cancelled by the user.')) {
+      if (!controller.signal.aborted) controller.abort(reason);
+      await cleanupPromise;
+    },
+    finishCleanup,
+  });
+}
+
+export function createDungeonAugmentationLoadingState(container, {
+  cancellation = null,
+} = {}) {
   const documentHost = container?.ownerDocument ?? globalThis.document;
   if (!container?.appendChild || !documentHost?.createElement) return null;
   const status = documentHost.createElement('div');
@@ -1181,23 +1203,23 @@ function createDungeonAugmentationLoadingState(container) {
   const title = documentHost.createElement('strong');
   title.textContent = 'Building supplemental dungeon';
   const detail = documentHost.createElement('span');
-  detail.textContent = 'Planning and validating the supplemental layout off the renderer thread.';
+  detail.textContent = 'Loading and validating the supplemental dungeon content.';
   const actions = documentHost.createElement('div');
   actions.className = 'dungeon-augmentation-loading-actions';
-  actions.hidden = true;
   const retry = documentHost.createElement('button');
   retry.type = 'button';
   retry.textContent = 'Retry';
+  retry.hidden = true;
   const cancel = documentHost.createElement('button');
   cancel.type = 'button';
   cancel.textContent = 'Cancel';
   actions.append(retry, cancel);
   status.append(title, detail, actions);
-  container.dataset.dungeonAugmentationPlanning = 'active';
+  container.dataset.dungeonAugmentationBuild = 'active';
   container.setAttribute('aria-busy', 'true');
   container.appendChild(status);
   const complete = () => {
-    delete container.dataset.dungeonAugmentationPlanning;
+    delete container.dataset.dungeonAugmentationBuild;
     container.removeAttribute('aria-busy');
     status.remove();
   };
@@ -1206,24 +1228,75 @@ function createDungeonAugmentationLoadingState(container) {
       globalThis.location.reload();
     }
   });
-  cancel.addEventListener?.('click', complete);
+  let cancellationPending = false;
+  cancel.addEventListener?.('click', async () => {
+    if (cancellationPending) return;
+    cancellationPending = true;
+    cancel.disabled = true;
+    try {
+      await cancellation?.cancelAndWait?.();
+    } finally {
+      complete();
+    }
+  });
   return {
-    update(realizationAttempt) {
-      const attempt = Math.max(0, Math.trunc(Number(realizationAttempt) || 0));
-      detail.textContent = attempt > 0
-        ? `Checking supplemental repair plan ${attempt + 1} without blocking the game window.`
-        : 'Planning and validating the supplemental layout off the renderer thread.';
+    update(phase) {
+      const phaseCopy = {
+        'artifact-loading': 'Verifying the authored dungeon artifact.',
+        'asset-preparation': 'Fetching and decoding the authored dungeon assets.',
+        'parent-generation': 'Constructing the authored dungeon layout.',
+        validation: 'Validating traversal, progression, and presentation.',
+        assembly: 'Assembling the authored dungeon render batches.',
+        activation: 'Activating the authored dungeon.',
+      };
+      detail.textContent = phaseCopy[phase]
+        ?? 'Loading and validating the authored dungeon content.';
     },
     complete,
     fail(error) {
-      container.dataset.dungeonAugmentationPlanning = 'failed';
+      container.dataset.dungeonAugmentationBuild = 'failed';
       container.removeAttribute('aria-busy');
       status.dataset.dungeonAugmentationLoading = 'failed';
       title.textContent = 'Supplemental dungeon could not be built';
       detail.textContent = error?.message ?? String(error);
-      actions.hidden = false;
+      retry.hidden = false;
     },
   };
+}
+
+function createOneShotDungeonDisposer(generator, dungeon) {
+  let ownedDungeon = dungeon;
+  return () => {
+    if (!ownedDungeon) return false;
+    const disposableDungeon = ownedDungeon;
+    ownedDungeon = null;
+    generator?._disposeGeneratedDungeonCandidate?.(disposableDungeon);
+    return true;
+  };
+}
+
+function createPreparedAuthoredAssetLifetime(preparedAssets) {
+  let ownedAssets = preparedAssets;
+  let disposalPromise = null;
+  const lifetime = {
+    disposalError: null,
+    dispose() {
+      if (disposalPromise) return disposalPromise;
+      const assets = ownedAssets;
+      ownedAssets = null;
+      try {
+        disposalPromise = Promise.resolve(assets?.dispose?.()).catch((error) => {
+          lifetime.disposalError = error;
+          return Object.freeze({ disposedCount: 0, error });
+        });
+      } catch (error) {
+        lifetime.disposalError = error;
+        disposalPromise = Promise.resolve(Object.freeze({ disposedCount: 0, error }));
+      }
+      return disposalPromise;
+    },
+  };
+  return lifetime;
 }
 
 function normalizeInitialDungeonGenerationSpec(generationSpec = {}) {
@@ -1289,157 +1362,240 @@ function shouldPrepareInitialDungeonAugmentation(generationSpec = {}) {
   );
 }
 
+export async function runDungeonAugmentationGenerationTransaction({
+  layoutSeed,
+  difficulty,
+  bossProfileId,
+  dungeonFamilyId,
+  augmentationRequest,
+  loadingState = null,
+  signal = null,
+  onProgress = null,
+  dependencies = null,
+} = {}) {
+  const GeneratorClass = dependencies?.DungeonGenerator ?? DungeonGenerator;
+  const createRandom = dependencies?.createRandom ?? createDungeonRandom;
+  const loadAuthoredArtifact = dependencies?.loadAuthoredArtifact
+    ?? loadIndustrialV4AuthoredArtifact;
+  const prepareAuthoredAssets = dependencies?.prepareAuthoredAssets
+    ?? prepareIndustrialV4AuthoredAssets;
+  const now = dependencies?.now
+    ?? (() => globalThis.performance?.now?.() ?? Date.now());
+  const transactionStartedAt = now();
+  const reportProgress = (phase) => {
+    loadingState?.update?.(phase);
+    onProgress?.({ phase, realizationAttempt: null, requestKey: null });
+  };
+  const requestedProfileId = augmentationRequest?.augmentationProfileId ?? null;
+  const committedIdentity = augmentationRequest?.committedAugmentationIdentity ?? null;
+  const legacyProfileIds = new Set([
+    INDUSTRIAL_SUPPLEMENT_PREVIEW_PROFILE_ID,
+    INDUSTRIAL_SUPPLEMENT_PREVIEW_V2_PROFILE_ID,
+    INDUSTRIAL_SUPPLEMENT_PREVIEW_V3_PROFILE_ID,
+  ]);
+  const legacyCommittedIdentity = Boolean(
+    committedIdentity
+      && (
+        committedIdentity.generationMode !== INDUSTRIAL_V4_AUTHORED_GENERATION_MODE
+        || committedIdentity.profileId !== INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID
+      ),
+  );
+  if (legacyProfileIds.has(requestedProfileId) || legacyCommittedIdentity) {
+    throw new DungeonAugmentationIncompatibleContentError(
+      'This procedural dungeon augmentation profile is available for offline diagnostics only. Reset to authored V4 or abandon the expedition to continue.',
+      {
+        compatible: false,
+        status: 'legacy-profile-offline-only',
+        resetOrAbandonRequired: true,
+        requestedProfileId,
+        replacementProfileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+        errors: [{
+          code: 'legacy-profile-offline-only',
+          message: 'Procedural V1-V4 expedition content cannot be generated in the browser.',
+        }],
+      },
+    );
+  }
+
+  const authoredV4Requested = requestedProfileId
+    === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID
+    || Boolean(
+      requestedProfileId == null
+        && committedIdentity?.generationMode === INDUSTRIAL_V4_AUTHORED_GENERATION_MODE
+        && committedIdentity?.profileId === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+    );
+  if (!authoredV4Requested) {
+    throw new DungeonAugmentationIncompatibleContentError(
+      'Browser dungeon augmentation supports only the authored V4 artifact. Use authored V4 or abandon this request.',
+      {
+        compatible: false,
+        status: 'unsupported-augmentation-profile',
+        resetOrAbandonRequired: Boolean(committedIdentity),
+        requestedProfileId,
+        replacementProfileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+        errors: [{
+          code: 'browser-procedural-planning-disabled',
+          message: 'Procedural dungeon augmentation is available only to Node-based offline authoring and diagnostics.',
+        }],
+      },
+    );
+  }
+
+  let authoredGenerator = null;
+  let authoredDungeon = null;
+  let preparedAssets = null;
+  let assetCacheLease = null;
+  let artifactVerificationTimeMs = 0;
+  let assetPreparationTimeMs = 0;
+  let assetCacheHandoffTimeMs = 0;
+  let assetCacheHandoffCount = 0;
+  let authoredGenerationTimeMs = 0;
+  try {
+    throwIfDungeonBuildAborted(signal);
+    reportProgress('artifact-loading');
+    const artifactLoadingStartedAt = now();
+    const artifact = await loadAuthoredArtifact({
+      profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+      signal,
+      requestedLayoutSeed: layoutSeed,
+    });
+    artifactVerificationTimeMs = Math.max(0, now() - artifactLoadingStartedAt);
+    throwIfDungeonBuildAborted(signal);
+    reportProgress('asset-preparation');
+    const assetPreparationStartedAt = now();
+    preparedAssets = await prepareAuthoredAssets({ artifact, signal });
+    assetPreparationTimeMs = Math.max(0, now() - assetPreparationStartedAt);
+    throwIfDungeonBuildAborted(signal);
+    const assetCacheHandoffStartedAt = now();
+    assetCacheLease = preparedAssets.installIntoCache?.(THREE.Cache) ?? null;
+    assetCacheHandoffCount = Math.max(
+      0,
+      Number(assetCacheLease?.installedCount) || 0,
+    );
+    assetCacheHandoffTimeMs = Math.max(0, now() - assetCacheHandoffStartedAt);
+    reportProgress('parent-generation');
+    const authoredGenerationStartedAt = now();
+    authoredGenerator = new GeneratorClass({
+      difficulty,
+      random: createRandom(artifact.canonicalLayoutSeed),
+      bossProfileId,
+      dungeonFamilyId,
+      augmentationProfileId: artifact.profileId,
+      augmentationSeed: artifact.canonicalLayoutSeed,
+      basePlanHash: artifact.baseGeometryHash,
+      committedAugmentationIdentity: committedIdentity,
+      authoredAugmentationArtifact: artifact,
+      requestedLayoutSeed: layoutSeed,
+      allowInvalidAugmentationPreview: false,
+    });
+    authoredDungeon = await authoredGenerator.generateAsync();
+    authoredGenerationTimeMs = Math.max(0, now() - authoredGenerationStartedAt);
+    assetCacheLease?.dispose?.();
+    assetCacheLease = null;
+    throwIfDungeonBuildAborted(signal);
+    reportProgress('validation');
+    authoredDungeon.requestedLayoutSeed = String(layoutSeed);
+    authoredDungeon.resolvedLayoutSeed = artifact.canonicalLayoutSeed;
+    authoredDungeon.layoutSeed = artifact.canonicalLayoutSeed;
+    authoredDungeon.preparedBuildDiagnostics = {
+      schema: 'prepared-dungeon-build-diagnostics/v1',
+      generationMode: artifact.generationMode,
+      artifactId: artifact.artifactId,
+      artifactRevision: artifact.artifactRevision,
+      artifactHash: artifact.artifactHash,
+      assetDecodeReceipt: preparedAssets.receipt,
+      requestedLayoutSeed: String(layoutSeed),
+      resolvedLayoutSeed: artifact.canonicalLayoutSeed,
+      plannerWorkerCreated: false,
+      proceduralPlanningInvoked: false,
+      totalTimeMs: Math.max(0, now() - transactionStartedAt),
+      artifactVerificationTimeMs,
+      assetPreparationTimeMs,
+      assetPreparationMetrics: preparedAssets.metrics ?? null,
+      assetCacheHandoffTimeMs,
+      assetCacheHandoffCount,
+      authoredGenerationTimeMs,
+      materializationTimeMs: Math.max(
+        0,
+        Number(authoredDungeon.augmentationMetrics?.materializationTimeMs) || 0,
+      ),
+      rendererFreeValidationTimeMs: Math.max(
+        0,
+        Number(authoredDungeon.augmentationMetrics?.rendererFreeValidationTimeMs) || 0,
+      ),
+      threeJsAssemblyTimeMs: Math.max(
+        0,
+        Number(authoredDungeon.augmentationMetrics?.assemblyTimeMs) || 0,
+      ),
+      assemblyCount: 1,
+      requestStartedAtMs: transactionStartedAt,
+    };
+    const authoredAssetLifetime = createPreparedAuthoredAssetLifetime(preparedAssets);
+    authoredDungeon.disposableResources = [
+      ...(authoredDungeon.disposableResources ?? []),
+      authoredAssetLifetime,
+    ];
+    preparedAssets = null;
+    const completedDungeon = authoredDungeon;
+    authoredDungeon = null;
+    return {
+      dungeon: completedDungeon,
+      disposeDungeon: createOneShotDungeonDisposer(authoredGenerator, completedDungeon),
+    };
+  } catch (error) {
+    if (assetCacheLease) {
+      try {
+        assetCacheLease.dispose?.();
+      } catch (cleanupError) {
+        if (error && typeof error === 'object') {
+          error.authoredAssetCacheCleanupError = cleanupError;
+        }
+      }
+      assetCacheLease = null;
+    }
+    if (authoredDungeon) {
+      authoredGenerator?._disposeGeneratedDungeonCandidate?.(authoredDungeon);
+      authoredDungeon = null;
+    }
+    if (preparedAssets) {
+      try {
+        await preparedAssets.dispose();
+      } catch (cleanupError) {
+        if (error && typeof error === 'object') {
+          error.authoredAssetCleanupError = cleanupError;
+        }
+      }
+      preparedAssets = null;
+    }
+    throw error;
+  }
+}
+
 async function prepareInitialDungeonAugmentation({
   loadingState = null,
   generationSpec = {},
   signal = null,
 } = {}) {
-  const transactionStartedAt = globalThis.performance?.now?.() ?? Date.now();
-  const {
-    layoutSeed,
-    difficulty,
-    bossProfileId,
-    dungeonFamilyId,
-    augmentationRequest,
-    basePlanHash,
-    requestKey,
-  } = normalizeInitialDungeonGenerationSpec(generationSpec);
-  const augmentationProfileId = augmentationRequest.augmentationProfileId;
-  let plannerSession = null;
-  let generatedDungeon = null;
-  const workerPassDiagnostics = [];
-  const generator = new DungeonGenerator({
-    difficulty,
-    random: createDungeonRandom(layoutSeed),
-    bossProfileId,
-    dungeonFamilyId,
-    augmentationProfileId,
-    augmentationSeed: layoutSeed,
-    basePlanHash,
-    committedAugmentationIdentity: augmentationRequest.committedAugmentationIdentity,
-    allowInvalidAugmentationPreview: readDungeonAugmentationPlayableAlphaMode(),
+  const normalized = normalizeInitialDungeonGenerationSpec(generationSpec);
+  const transaction = await runDungeonAugmentationGenerationTransaction({
+    ...normalized,
+    loadingState,
+    signal,
   });
-  try {
-    throwIfDungeonBuildAborted(signal);
-    plannerSession = createDungeonAugmentationBrowserPlannerSession({ signal });
-    const dungeon = await generator.generateAsync({
-      augmentationPlanner: (request) => {
-        loadingState?.update(request.realizationAttempt);
-        return plannerSession.plan(request.plannerInput, {
-          realizationAttempt: request.realizationAttempt,
-        }).then((planned) => {
-          workerPassDiagnostics.push({
-            realizationAttempt: request.realizationAttempt,
-            ...(planned.workerDiagnostics ?? {}),
-          });
-          return planned;
-        });
-      },
-    });
-    generatedDungeon = dungeon;
-    throwIfDungeonBuildAborted(signal);
-    const replayDiagnostics = dungeon.augmentationReplayDiagnostics ?? {};
-    dungeon.preparedBuildDiagnostics = {
-      schema: 'prepared-dungeon-build-diagnostics/v1',
-      totalTimeMs: Math.max(
-        0,
-        (globalThis.performance?.now?.() ?? Date.now()) - transactionStartedAt,
-      ),
-      workerBacked: true,
-      repairCount: Math.max(0, Number(replayDiagnostics.runtimePruningPasses) || 0),
-      planningPasses: (replayDiagnostics.planningPasses ?? []).map((pass) => ({ ...pass })),
-      cumulativePlanningTimeMs: Math.max(
-        0,
-        Number(replayDiagnostics.cumulativePlanningTimeMs) || 0,
-      ),
-      authoredGenerationTimeMs: Math.max(
-        0,
-        Number(replayDiagnostics.authoredGenerationTimeMs) || 0,
-      ),
-      replayTransactionTimeMs: Math.max(
-        0,
-        Number(replayDiagnostics.transactionTimeMs) || 0,
-      ),
-      materializationTimeMs: Math.max(
-        0,
-        Number(dungeon.augmentationMetrics?.materializationTimeMs) || 0,
-      ),
-      rendererFreeValidationTimeMs: Math.max(
-        0,
-        Number(dungeon.augmentationMetrics?.rendererFreeValidationTimeMs) || 0,
-      ),
-      threeJsAssemblyTimeMs: Math.max(
-        0,
-        Number(dungeon.augmentationMetrics?.assemblyTimeMs) || 0,
-      ),
-      assemblyCount: 1,
-      requestStartedAtMs: transactionStartedAt,
-      ...summarizeDungeonWorkerPassDiagnostics(workerPassDiagnostics),
-    };
-    generatedDungeon = null;
-    return {
-      schema: PREPARED_INITIAL_DUNGEON_SCHEMA,
-      requestKey,
-      layoutSeed,
-      difficulty,
-      bossProfileId,
-      dungeonFamilyId,
-      augmentationProfileId,
-      basePlanHash,
-      dungeon,
-    };
-  } catch (error) {
-    if (generatedDungeon) {
-      generator._disposeGeneratedDungeonCandidate?.(generatedDungeon);
-      generatedDungeon = null;
-    }
-    // The explicit fresh URL is a strict diagnostics surface: never hide a
-    // planner failure there. Ordinary, uncommitted startup is allowed to keep
-    // the authored parent playable when the bounded planner watchdog expires.
-    if (error?.name === 'AbortError'
-      || augmentationRequest.committedAugmentationIdentity
-      || readDungeonAugmentationFreshMode()
-      || readDungeonAugmentationPlayableAlphaMode()) throw error;
-    const fallbackStartedAt = globalThis.performance?.now?.() ?? Date.now();
-    const dungeon = new DungeonGenerator({
-      difficulty,
-      random: createDungeonRandom(layoutSeed),
-      bossProfileId,
-      dungeonFamilyId,
-    }).generate();
-    dungeon.preparedBuildDiagnostics = {
-      schema: 'prepared-dungeon-build-diagnostics/v1',
-      totalTimeMs: Math.max(
-        0,
-        (globalThis.performance?.now?.() ?? Date.now()) - transactionStartedAt,
-      ),
-      fallbackAssemblyTimeMs: Math.max(
-        0,
-        (globalThis.performance?.now?.() ?? Date.now()) - fallbackStartedAt,
-      ),
-      workerBacked: false,
-      repairCount: 0,
-      requestStartedAtMs: transactionStartedAt,
-      fallback: 'authored-parent',
-      augmentationError: error?.message ?? String(error),
-    };
-    return {
-      schema: PREPARED_INITIAL_DUNGEON_SCHEMA,
-      requestKey,
-      layoutSeed,
-      difficulty,
-      bossProfileId,
-      dungeonFamilyId,
-      // Retain the requested profile in the wrapper so the one-shot prepared
-      // value is accepted without re-entering the synchronous augmentation
-      // planner. The facade itself truthfully carries only the base-plan hash.
-      augmentationProfileId,
-      basePlanHash,
-      dungeon,
-    };
-  } finally {
-    plannerSession?.dispose();
-  }
+  return {
+    schema: PREPARED_INITIAL_DUNGEON_SCHEMA,
+    requestKey: normalized.requestKey,
+    layoutSeed: normalized.layoutSeed,
+    difficulty: normalized.difficulty,
+    bossProfileId: normalized.bossProfileId,
+    dungeonFamilyId: normalized.dungeonFamilyId,
+    // Retain the requested profile so consuming the prepared dungeon cannot
+    // accidentally re-enter synchronous augmentation generation.
+    augmentationProfileId: normalized.augmentationRequest.augmentationProfileId,
+    basePlanHash: normalized.basePlanHash,
+    dungeon: transaction.dungeon,
+    disposeDungeon: transaction.disposeDungeon,
+  };
 }
 
 function getBusterMagazineRecoveryTime(plan) {
@@ -1718,6 +1874,7 @@ export class Game {
     if (openingWarning) busterLabStorage.lastWarning = openingWarning;
     const container = options.container ?? globalThis.document?.getElementById?.('game-container');
     let loadingState = null;
+    let buildCancellation = null;
     let preparedInitialDungeon = options.preparedInitialDungeon ?? null;
     try {
       const disposableDungeonRequest = readDungeonAugmentationPlayableAlphaMode()
@@ -1742,11 +1899,14 @@ export class Game {
       );
       if (!preparedInitialDungeon
         && shouldPrepareInitialDungeonAugmentation(initialDungeonGenerationSpec)) {
-        loadingState = createDungeonAugmentationLoadingState(container);
+        buildCancellation = createOwnedDungeonBuildCancellation(options.signal ?? null);
+        loadingState = createDungeonAugmentationLoadingState(container, {
+          cancellation: buildCancellation,
+        });
         preparedInitialDungeon = await prepareInitialDungeonAugmentation({
           loadingState,
           generationSpec: initialDungeonGenerationSpec,
-          signal: options.signal ?? null,
+          signal: buildCancellation.signal,
         });
       }
       const game = new Game({
@@ -1755,6 +1915,7 @@ export class Game {
         preparedInitialDungeon,
         deferBusterLabInitialization: true,
       });
+      preparedInitialDungeon = null;
       if (game.busterLabEnabled) {
         await game._initializeBusterLabFeature();
       } else {
@@ -1765,8 +1926,13 @@ export class Game {
       loadingState?.complete();
       return game;
     } catch (error) {
-      loadingState?.fail(error);
+      preparedInitialDungeon?.disposeDungeon?.();
+      preparedInitialDungeon = null;
+      if (error?.name === 'AbortError') loadingState?.complete();
+      else loadingState?.fail(error);
       throw error;
+    } finally {
+      buildCancellation?.finishCleanup();
     }
   }
 
@@ -1794,10 +1960,17 @@ export class Game {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.container.appendChild(this.renderer.domElement);
-    this.dungeonPerformanceTelemetry = new DungeonPerformanceTelemetry();
-    const requestedDungeonQualityMode = new URLSearchParams(
+    const dungeonRuntimeParameters = new URLSearchParams(
       globalThis.location?.search ?? '',
-    ).get('dungeonQuality') ?? DUNGEON_QUALITY_MODES.AUTO;
+    );
+    this.dungeonPerformanceDiagnosticsEnabled =
+      dungeonRuntimeParameters.get('dungeonPerformanceDiagnostics') === '1';
+    this.dungeonPerformanceCaptureProvenance = null;
+    this.dungeonPerformanceTelemetry = this.dungeonPerformanceDiagnosticsEnabled
+      ? new DungeonPerformanceTelemetry({ enabled: true, observeLongTasks: true })
+      : null;
+    const requestedDungeonQualityMode = dungeonRuntimeParameters.get('dungeonQuality')
+      ?? DUNGEON_QUALITY_MODES.AUTO;
     try {
       this.dungeonQualityController = new AdaptiveDungeonQualityController({
         mode: requestedDungeonQualityMode,
@@ -4444,6 +4617,9 @@ export class Game {
           layoutSeed,
           difficulty: expeditionDepth,
           dungeonFamilyId: persisted.dungeonFamilyId ?? INDUSTRIAL_DUNGEON_FAMILY_ID,
+          augmentationProfileId: resetToCurrentContent
+            ? INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID
+            : this.dungeonAugmentationProfileId,
           dungeonAugmentation: resetToCurrentContent
             ? undefined
             : persisted.dungeonAugmentation ?? null,
@@ -5145,14 +5321,46 @@ export class Game {
     return this._returnToStreamedOverworld({ outcome: 'abandoned' });
   }
 
-  resetDungeonPerformanceTelemetry() {
+  _getDungeonPerformanceFixtureIdentity() {
+    return {
+      worldKind: this.activeWorldBundle?.worldKind ?? this.worldKind ?? null,
+      layoutSeed: this.dungeon?.layoutSeed ?? this.dungeonLayoutSeed ?? null,
+      basePlanHash: this.dungeon?.basePlanHash ?? null,
+      augmentationPlanHash: this.dungeon?.augmentationPlanHash ?? null,
+      effectivePlanHash: this.dungeon?.effectivePlanHash ?? null,
+    };
+  }
+
+  resetDungeonPerformanceTelemetry({
+    warmupCompleted = false,
+  } = {}) {
+    if (!this.dungeonPerformanceDiagnosticsEnabled) return null;
+    const qualityTier = this.dungeonQualityController?.getSnapshot?.()?.tier ?? null;
+    const fixtureIdentity = this._getDungeonPerformanceFixtureIdentity();
+    this.dungeonPerformanceCaptureProvenance = {
+      sampleKind: 'fixed-fixture',
+      fixtureId: hashCanonicalValue(fixtureIdentity, {
+        namespace: 'ruindivex-dungeon-performance-fixture/v1',
+      }),
+      fixtureIdentity,
+      qualityTier,
+      warmupCompleted: warmupCompleted === true,
+      sampleStartedAtMs: globalThis.performance?.now?.() ?? Date.now(),
+    };
     this.dungeonPerformanceTelemetry?.resetSamples?.();
     return this.getDungeonPerformanceDiagnostics();
   }
 
   getDungeonPerformanceDiagnostics() {
+    if (!this.dungeonPerformanceDiagnosticsEnabled) return null;
     const activeRoot = this.activeWorldBundle?.root ?? null;
     const retainedResources = this._collectRenderResources(activeRoot);
+    const captureProvenance = this.dungeonPerformanceCaptureProvenance;
+    const currentFixtureIdentity = this._getDungeonPerformanceFixtureIdentity();
+    const currentFixtureId = hashCanonicalValue(currentFixtureIdentity, {
+      namespace: 'ruindivex-dungeon-performance-fixture/v1',
+    });
+    const nowMs = globalThis.performance?.now?.() ?? Date.now();
     const snapshot = this.dungeonPerformanceTelemetry?.getSnapshot?.({
       renderer: this.renderer,
       scene: this.scene,
@@ -5165,6 +5373,15 @@ export class Game {
         ?? null,
       retainedResources,
       disposableResources: this.activeWorldBundle?.disposableResources,
+      provenance: captureProvenance ? {
+        ...captureProvenance,
+        currentFixtureId,
+        currentFixtureIdentity,
+        sampleDurationMs: Math.max(
+          0,
+          nowMs - Number(captureProvenance.sampleStartedAtMs),
+        ),
+      } : null,
     }) ?? null;
     return snapshot ? {
       ...snapshot,
@@ -5172,7 +5389,7 @@ export class Game {
     } : null;
   }
 
-  getWorldTransitionDiagnostics() {
+  getWorldTransitionDiagnostics({ includeDetailedPerformance = false } = {}) {
     const rendererInfo = this.renderer?.info ?? {};
     const activeRoot = this.activeWorldBundle?.root ?? null;
     const mountedRuntime = validateMountedRuntimeStateHost(this);
@@ -5255,7 +5472,9 @@ export class Game {
         geometries: rendererInfo.memory?.geometries ?? 0,
         textures: rendererInfo.memory?.textures ?? 0,
       },
-      performance: this.getDungeonPerformanceDiagnostics(),
+      performance: includeDetailedPerformance
+        ? this.getDungeonPerformanceDiagnostics()
+        : null,
       dungeonAugmentation: this.activeWorldBundle?.worldKind === 'dungeon' ? {
         status: this.dungeon?.augmentationStatus ?? 'disabled',
         profileId: this.dungeon?.augmentationIdentity?.profileId ?? null,
@@ -10926,6 +11145,7 @@ export class Game {
     difficulty = this.ruinFloor,
     dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
     dungeonAugmentation = undefined,
+    augmentationProfileId = this.dungeonAugmentationProfileId,
   } = {}, {
     signal = null,
     onProgress = null,
@@ -10934,22 +11154,23 @@ export class Game {
     const resolvedDungeonFamilyId = dungeonFamilySelection.dungeonFamilyId;
     const augmentationRequest = resolveDungeonAugmentationGenerationRequest(
       dungeonAugmentation,
-      this.dungeonAugmentationProfileId,
+      augmentationProfileId,
     );
-    const canUseWorkerPlanner = Boolean(
+    const requiresAsyncAugmentationBuild = Boolean(
       (augmentationRequest.augmentationProfileId
         || augmentationRequest.committedAugmentationIdentity)
         && !this._creatingBusterSandbox
         && !this.roomPreview?.roomId
         && bossProfileId !== ASCENSION_ENGINE_PROFILE_ID,
     );
-    if (!canUseWorkerPlanner) {
+    if (!requiresAsyncAugmentationBuild) {
       return this._createLegacyDungeonWorldCandidate({
         bossProfileId,
         layoutSeed,
         difficulty,
         dungeonFamilyId: resolvedDungeonFamilyId,
         dungeonAugmentation,
+        augmentationProfileId,
       });
     }
 
@@ -10959,112 +11180,36 @@ export class Game {
       bossProfileId,
       dungeonFamilyId: resolvedDungeonFamilyId,
     });
-    const loadingState = createDungeonAugmentationLoadingState(this.container);
-    const transactionStartedAt = globalThis.performance?.now?.() ?? Date.now();
-    let plannerSession = null;
-    let generatedDungeon = null;
-    let candidate = null;
-    const workerPassDiagnostics = [];
-    const generator = new DungeonGenerator({
-      difficulty,
-      random: createDungeonRandom(layoutSeed),
-      bossProfileId,
-      dungeonFamilyId: resolvedDungeonFamilyId,
-      augmentationProfileId: augmentationRequest.augmentationProfileId,
-      augmentationSeed: layoutSeed,
-      basePlanHash,
-      committedAugmentationIdentity: augmentationRequest.committedAugmentationIdentity,
-      allowInvalidAugmentationPreview: Boolean(
-        this.dungeonAugmentationPlayableAlphaMode
-          && augmentationRequest.augmentationProfileId
-            === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
-      ),
+    const cancellation = createOwnedDungeonBuildCancellation(signal);
+    const loadingState = createDungeonAugmentationLoadingState(this.container, {
+      cancellation,
     });
+    let preparedTransaction = null;
+    let candidate = null;
     try {
-      throwIfDungeonBuildAborted(signal);
-      plannerSession = createDungeonAugmentationBrowserPlannerSession({ signal });
-      onProgress?.({ phase: 'parent-generation', realizationAttempt: null, requestKey: null });
-      throwIfDungeonBuildAborted(signal);
-      const dungeon = await generator.generateAsync({
-        augmentationPlanner: (request) => {
-          loadingState?.update(request.realizationAttempt);
-          onProgress?.({
-            phase: request.realizationAttempt > 0 ? 'repair' : 'planning',
-            realizationAttempt: request.realizationAttempt,
-            requestKey: request.requestKey,
-          });
-          throwIfDungeonBuildAborted(signal);
-          return plannerSession.plan(request.plannerInput, {
-            realizationAttempt: request.realizationAttempt,
-          }).then((planned) => {
-            workerPassDiagnostics.push({
-              realizationAttempt: request.realizationAttempt,
-              ...(planned.workerDiagnostics ?? {}),
-            });
-            return planned;
-          });
-        },
+      preparedTransaction = await runDungeonAugmentationGenerationTransaction({
+        layoutSeed,
+        difficulty,
+        bossProfileId,
+        dungeonFamilyId: resolvedDungeonFamilyId,
+        augmentationRequest,
+        loadingState,
+        signal: cancellation.signal,
+        onProgress,
       });
-      generatedDungeon = dungeon;
-      throwIfDungeonBuildAborted(signal);
-      onProgress?.({ phase: 'validation', realizationAttempt: null, requestKey: null });
-      throwIfDungeonBuildAborted(signal);
-      dungeon.preparedBuildDiagnostics = {
-        schema: 'prepared-dungeon-build-diagnostics/v1',
-        totalTimeMs: Math.max(
-          0,
-          (globalThis.performance?.now?.() ?? Date.now()) - transactionStartedAt,
-        ),
-        workerBacked: true,
-        repairCount: Math.max(
-          0,
-          Number(dungeon.augmentationReplayDiagnostics?.runtimePruningPasses) || 0,
-        ),
-        planningPasses: (
-          dungeon.augmentationReplayDiagnostics?.planningPasses ?? []
-        ).map((pass) => ({ ...pass })),
-        cumulativePlanningTimeMs: Math.max(
-          0,
-          Number(
-            dungeon.augmentationReplayDiagnostics?.cumulativePlanningTimeMs,
-          ) || 0,
-        ),
-        authoredGenerationTimeMs: Math.max(
-          0,
-          Number(dungeon.augmentationReplayDiagnostics?.authoredGenerationTimeMs) || 0,
-        ),
-        replayTransactionTimeMs: Math.max(
-          0,
-          Number(dungeon.augmentationReplayDiagnostics?.transactionTimeMs) || 0,
-        ),
-        materializationTimeMs: Math.max(
-          0,
-          Number(dungeon.augmentationMetrics?.materializationTimeMs) || 0,
-        ),
-        rendererFreeValidationTimeMs: Math.max(
-          0,
-          Number(dungeon.augmentationMetrics?.rendererFreeValidationTimeMs) || 0,
-        ),
-        threeJsAssemblyTimeMs: Math.max(
-          0,
-          Number(dungeon.augmentationMetrics?.assemblyTimeMs) || 0,
-        ),
-        assemblyCount: 1,
-        requestStartedAtMs: transactionStartedAt,
-        ...summarizeDungeonWorkerPassDiagnostics(workerPassDiagnostics),
-      };
       onProgress?.({ phase: 'assembly', realizationAttempt: null, requestKey: null });
-      throwIfDungeonBuildAborted(signal);
+      throwIfDungeonBuildAborted(cancellation.signal);
       candidate = this._createLegacyDungeonWorldCandidate({
         bossProfileId,
         layoutSeed,
         difficulty,
         dungeonFamilyId: resolvedDungeonFamilyId,
         dungeonAugmentation,
-        preparedDungeon: dungeon,
+        augmentationProfileId,
+        preparedDungeon: preparedTransaction.dungeon,
       });
-      generatedDungeon = null;
-      throwIfDungeonBuildAborted(signal);
+      preparedTransaction = null;
+      throwIfDungeonBuildAborted(cancellation.signal);
       if (typeof onProgress === 'function') {
         Object.defineProperty(candidate, 'dungeonBuildActivationProgress', {
           configurable: true,
@@ -11075,10 +11220,8 @@ export class Game {
       loadingState?.complete();
       return candidate;
     } catch (error) {
-      if (generatedDungeon) {
-        generator._disposeGeneratedDungeonCandidate?.(generatedDungeon);
-        generatedDungeon = null;
-      }
+      preparedTransaction?.disposeDungeon?.();
+      preparedTransaction = null;
       if (candidate) {
         this._disposeUncommittedWorldCandidate(candidate);
         candidate = null;
@@ -11087,83 +11230,10 @@ export class Game {
         loadingState?.complete();
         throw error;
       }
-      const strictDisposableRun = Boolean(
-        this.dungeonAugmentationFreshMode
-          || this.dungeonAugmentationPlayableAlphaMode,
-      );
-      if (augmentationRequest.committedAugmentationIdentity || strictDisposableRun) {
-        loadingState?.fail(error);
-        throw error;
-      }
-
-      // Fresh production requests may fall back to the authored parent, but a
-      // committed augmented identity above must always fail closed. Build the
-      // fallback before touching the mounted world so cancellation/failure
-      // preserves the currently playable scene.
-      onProgress?.({
-        phase: 'parent-fallback',
-        realizationAttempt: null,
-        requestKey: null,
-        error: error?.message ?? String(error),
-      });
-      throwIfDungeonBuildAborted(signal);
-      const fallbackStartedAt = globalThis.performance?.now?.() ?? Date.now();
-      const fallbackGenerator = new DungeonGenerator({
-        difficulty,
-        random: createDungeonRandom(layoutSeed),
-        bossProfileId,
-        dungeonFamilyId: resolvedDungeonFamilyId,
-      });
-      const dungeon = fallbackGenerator.generate();
-      if (signal?.aborted) {
-        fallbackGenerator._disposeGeneratedDungeonCandidate?.(dungeon);
-        throw dungeonBuildAbortError(signal);
-      }
-      dungeon.layoutSeed = layoutSeed;
-      dungeon.basePlanHash ??= basePlanHash;
-      dungeon.effectivePlanHash ??= basePlanHash;
-      dungeon.preparedBuildDiagnostics = {
-        schema: 'prepared-dungeon-build-diagnostics/v1',
-        totalTimeMs: Math.max(
-          0,
-          (globalThis.performance?.now?.() ?? Date.now()) - transactionStartedAt,
-        ),
-        fallbackAssemblyTimeMs: Math.max(
-          0,
-          (globalThis.performance?.now?.() ?? Date.now()) - fallbackStartedAt,
-        ),
-        workerBacked: true,
-        repairCount: 0,
-        requestStartedAtMs: transactionStartedAt,
-        fallback: 'authored-parent',
-        augmentationError: error?.message ?? String(error),
-      };
-      candidate = this._createLegacyDungeonWorldCandidate({
-        bossProfileId,
-        layoutSeed,
-        difficulty,
-        dungeonFamilyId: resolvedDungeonFamilyId,
-        dungeonAugmentation,
-        preparedDungeon: dungeon,
-      });
-      try {
-        throwIfDungeonBuildAborted(signal);
-        if (typeof onProgress === 'function') {
-          Object.defineProperty(candidate, 'dungeonBuildActivationProgress', {
-            configurable: true,
-            enumerable: false,
-            value: onProgress,
-          });
-        }
-      } catch (activationError) {
-        this._disposeUncommittedWorldCandidate(candidate);
-        candidate = null;
-        throw activationError;
-      }
-      loadingState?.complete();
-      return candidate;
+      loadingState?.fail(error);
+      throw error;
     } finally {
-      plannerSession?.dispose();
+      cancellation.finishCleanup();
     }
   }
 
@@ -11173,6 +11243,7 @@ export class Game {
     difficulty = this.ruinFloor,
     dungeonFamilyId = INDUSTRIAL_DUNGEON_FAMILY_ID,
     dungeonAugmentation = undefined,
+    augmentationProfileId = this.dungeonAugmentationProfileId,
     preparedDungeon = null,
   } = {}) {
     const dungeonFamilySelection = resolveDungeonFamilyId(dungeonFamilyId);
@@ -11208,7 +11279,7 @@ export class Game {
     });
     const augmentationRequest = resolveDungeonAugmentationGenerationRequest(
       dungeonAugmentation,
-      this.dungeonAugmentationProfileId,
+      augmentationProfileId,
     );
     const preparedInitialDungeon = preparedDungeon ? null : this._preparedInitialDungeon;
     this._preparedInitialDungeon = null;
@@ -11218,7 +11289,7 @@ export class Game {
       bossProfileId,
       dungeonFamilyId: resolvedDungeonFamilyId,
       dungeonAugmentation,
-      augmentationProfileId: this.dungeonAugmentationProfileId,
+      augmentationProfileId,
     }).requestKey;
     const preparedMatches = Boolean(
       preparedInitialDungeon?.schema === PREPARED_INITIAL_DUNGEON_SCHEMA
@@ -11247,7 +11318,7 @@ export class Game {
       && !this.roomPreview?.roomId
       && bossProfileId !== ASCENSION_ENGINE_PROFILE_ID) {
       const error = new Error(
-        'Production augmented dungeon generation requires the asynchronous worker-backed loading pipeline.',
+        'Production augmented dungeon generation requires the asynchronous content-loading pipeline.',
       );
       error.code = 'DUNGEON_AUGMENTATION_ASYNC_PIPELINE_REQUIRED';
       throw error;
@@ -11273,7 +11344,10 @@ export class Game {
                 === INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
           ),
           }).generate());
-    dungeon.layoutSeed = layoutSeed;
+    dungeon.requestedLayoutSeed ??= String(layoutSeed);
+    dungeon.resolvedLayoutSeed ??= dungeon.augmentationIdentity?.resolvedLayoutSeed
+      ?? String(layoutSeed);
+    dungeon.layoutSeed = dungeon.resolvedLayoutSeed;
     dungeon.basePlanHash ??= basePlanHash;
     dungeon.effectivePlanHash ??= basePlanHash;
     const committedIdentity = sanitizeDungeonAugmentationSaveIdentity(dungeonAugmentation);

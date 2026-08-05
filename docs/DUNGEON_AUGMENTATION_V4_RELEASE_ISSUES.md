@@ -10,56 +10,63 @@ No sealed aggregate-and-receipts attestation has been supplied for this working 
 - Ordinal shard coverage: **not established**.
 - First-realization, strict-validation, diversity, and performance gates: **not established**.
 - Overall V4 release readiness: **blocked**.
-- Recovery goal status: **ended at the user's request as a diagnostic handoff, not as a release acceptance**.
+- Recovery goal status: **active performance recovery; this working tree is not a release acceptance**.
 
 This block is intentionally conservative. A canonical validator witness, a playable-alpha run, or a corpus aggregate without all same-source receipts cannot establish release. Supply `--evidence=<release-attestation.json>` only after the manifest shards and every required suite receipt have been sealed.
 <!-- V4_RELEASE_EVIDENCE_END -->
 
-## 2026-08-04 Seed001 startup follow-up - runtime blocker resolved
+## 2026-08-04 performance-recovery audit - canonical and release gates blocked
 
-This follow-up supersedes `CLOSEOUT-O02` and the browser-startup claims in the
-2026-08-03 closeout. It does not change the blocked V4 release verdict or close
-the separate planner-performance blocker.
+This audit supersedes the earlier 2026-08-04 “runtime blocker resolved” claim.
+The current code does not use a fresh worker for each repair. One
+request-scoped worker is reused for the complete dungeon transaction; the
+accepted-parent invariant crosses once, later repairs send compact dynamic
+patches, completed plan graphs remain local to one planner pass, and only
+complete structured-cloned salvage witnesses may survive between passes. Their
+full graph shape, including Map/Set contents and binary backing buffers, counts
+toward fail-closed entry, witness, entity, and estimated-byte limits. The
+worker is terminated when the transaction succeeds, is cancelled, times out,
+or fails.
 
-- **Symptom:** the exact fresh Seed001 URL returned HTTP 200, but synchronous
-  `augmentDungeonDraft()` work ran inside `Game` construction. The renderer
-  stopped responding during route-network search and the in-app browser
-  eventually reported that the page had crashed.
-- **Cause:** startup called the pure planner, every same-seed exact repair
-  replan, and Three.js materialization through one synchronous `generate()`
-  stack. Moving a persistent planner into a worker was insufficient by itself:
-  completed-candidate search state retained more than 2 GB after the first
-  Seed001 plan and the long-lived worker eventually exhausted its heap.
-- **Fix:** fresh augmented startup now displays an explicit loading surface and
-  drives every yielded planning/repair request asynchronously. Each request is
-  planned in a fresh module worker, while only the compact exact-salvage witness
-  entries are carried to the next worker for the same realization attempt.
-  Completed-plan memo entries remain local to one request, and terminating that
-  worker releases its transient route-search heap before the next repair. The
-  accepted Three.js dungeon is then consumed exactly once by the normal world
-  build after an exact seed/profile/family/base-hash check.
-- **Browser evidence:** 1.5 seconds after navigating the exact URL, the in-app
-  DOM remained responsive and exposed `Building supplemental dungeon` instead
-  of becoming unreachable. A later in-app inspection was blocked by the
-  browser URL policy, so this is a responsiveness receipt rather than a final
-  visual receipt.
-- **Terminal generation evidence:** a two-isolate harness using the production
-  browser-planner session completed the exact Seed001 replay in 267.4 seconds:
-  `status: applied`, strict validation accepted, zero errors, two exact runtime
-  repair passes, augmentation hash
-  `v1-0a81632d488d04354ba2b35ec2c0b3a2`, and effective hash
-  `v1-e82f9a1390f9f62a42e10d36c522922b`. Four disposable workers completed in
-  44.8, 60.7, 75.6, and 72.2 seconds; the persistent-worker reproduction had
-  failed with `ERR_WORKER_OUT_OF_MEMORY` at 173.5 seconds.
-- **Focused regressions:** 122/122 browser-worker, partial-first scheduling,
-  route-candidate performance, and blueprint tests pass. The worker contracts
-  cover stale-response rejection, per-attempt salvage-cache isolation, worker
-  recycling, error termination, every async repair yield, and structured
-  cloning of the real Seed001 planning request.
-- **Remaining issue:** Seed001 planning is still far above the unchanged
-  30-second release maximum. The game now remains responsive and completes,
-  but planner optimization remains `CLOSEOUT-O01` and release evidence remains
-  blocked.
+- **Canonical result:** the ordinary production Seed001 replay is not accepted.
+  Its first planner result has augmentation hash
+  `v1-940a43060311ce05c7379ce836972dd7`, effective hash
+  `v1-6759df25ede7bff8d09233cc7cd4a5e4`, 5 operations, 24 nodes, and 26
+  segments. Physical validation excludes keycard-to-trap segment 0, signature
+  `v1-a193cfea021740c5a661757f0d6db5d8`, for
+  `route-network-structural-frame-wall-run-missing`. The next same-seed repair
+  returns `route-network-parent-attachment-domain-exhausted`, so the overall
+  generation falls back/returns unchanged rather than producing an accepted
+  augmented dungeon.
+- **Performance result:** the final ordinary sink-free canonical check spent
+  102,164.0475 ms in its two planner passes and 108,059.1528 ms in the complete
+  test. This independently violates the 30,000 ms planner maximum.
+- **Cache isolation:** independently disabling cross-candidate endpoint
+  solid-feature volumes, translation-invariant route-shape booleans,
+  socket-route candidates, and minimum-level-span reuse reproduced the same
+  exact repair rejection. Those experiments are not fixes and were restored.
+- **Repair boundary:** the focused parent-anchored salvage fixture proves that
+  omitting one exact parent-attachment segment can retain the opposite rooted
+  component. The remaining defect is therefore in the full planner’s
+  repair/proposal reachability or witness-context handoff, not that standalone
+  salvage rule.
+- **Loading behavior:** startup and transition now call one shared generation
+  transaction. Cancel owns an `AbortController`, aborts the transaction, and
+  waits for worker/detached-candidate cleanup before removing the loading UI.
+  Focused behavior tests pass 6/6; browser release evidence has not been run.
+- **Telemetry:** detailed planner/runtime diagnostics are opt-in. The runtime
+  release evaluator fails closed without active supported long-task
+  observation, fixed-fixture/tier/warm-up/duration provenance, and correctly
+  paired combined occlusion-plus-LOS samples. Focused telemetry tests pass 8/8.
+  These evaluator cases are synthetic; no registered 60-second browser workload
+  or authoritative runtime receipt has run. The final combined focused gate
+  passes 227/227.
+- **Evidence status:** the prior accepted hashes
+  `v1-0a81632d488d04354ba2b35ec2c0b3a2` /
+  `v1-e82f9a1390f9f62a42e10d36c522922b`, browser responsiveness note, and
+  disposable-worker timings are historical chronology and are not current-tree
+  release receipts. No current canonical pair, 10-, 100-, or 1,000-seed corpus,
+  pinned-hardware performance run, or visual acceptance receipt exists.
 
 [Open the repaired Seed001 fresh-start test](http://127.0.0.1:5174/?startupWorld=dungeon&dungeonFamily=industrial-v1&busterLab=sandbox&playerInvulnerable=1&dungeonSeed=augmentation-realized-v4-001&reaverbotSeed=augmentation-realized-v4-001&dungeonAugmentation=industrial-supplement-preview-v4&dungeonAugmentationFresh=1)
 
@@ -103,7 +110,12 @@ The current strict test URL remains:
 
 [Open Seed001 with fresh V4 augmentation](http://127.0.0.1:5174/?startupWorld=dungeon&dungeonFamily=industrial-v1&busterLab=sandbox&playerInvulnerable=1&dungeonSeed=augmentation-realized-v4-001&reaverbotSeed=augmentation-realized-v4-001&dungeonAugmentation=industrial-supplement-preview-v4&dungeonAugmentationFresh=1)
 
-### Resolved or locally proven fixes
+### Previously reported local changes (not current release verification)
+
+The rows below are retained as investigation history. “Resolved” in these
+historical rows does not override the current audit above and must not be used
+as release evidence without a current focused regression plus the canonical
+and release gates.
 
 | ID | Status | Cause | Fix | Current evidence |
 | --- | --- | --- | --- | --- |

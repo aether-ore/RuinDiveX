@@ -262,3 +262,22 @@ test('canonical evidence rejects malformed or incomplete six-phase timing proof'
     /generator phase timings is malformed or internally inconsistent/,
   );
 });
+
+test('unit verifier CLI rejects unknown and silently contracted modes', async () => {
+  const verifierSource = await readFile(
+    new URL('../scripts/verify-dungeon-augmentation.mjs', import.meta.url),
+    'utf8',
+  );
+  assert.match(verifierSource, /const unknownArguments = commandArguments\.filter/u);
+  assert.match(verifierSource, /Unsupported argument\(s\)/u);
+  assert.match(
+    verifierSource,
+    /--count must be an integer greater than or equal to 100/u,
+  );
+  assert.match(verifierSource, /--list-files cannot be combined/u);
+  assert.match(verifierSource, /readdirSync\(new URL\('\.\.\/tests\//u);
+  assert.match(verifierSource, /\^dungeon-augmentation-/u);
+  assert.match(verifierSource, /dungeon-room-spawn-context-performance\.test\.mjs/u);
+  assert.match(verifierSource, /dungeon-scaffold-access-optimization\.test\.mjs/u);
+  assert.match(verifierSource, /--test-concurrency=1/u);
+});

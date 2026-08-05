@@ -26,6 +26,7 @@ test-results/
 
 # Local Codex/session scratch data
 .agents/
+.codex-temp/
 .level-forge/
 
 # Unity generated state (the authored Unity project lives in unity/RuinCrawler)

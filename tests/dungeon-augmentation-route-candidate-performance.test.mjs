@@ -2362,7 +2362,36 @@ test('objective external terminal diagnostics replace stale refinement fields', 
   assert.equal('stateCount' in diagnostics, false);
   assert.equal('selectedStateIndex' in diagnostics, false);
   assert.equal('bestStateSocketPairs' in diagnostics, false);
-  assert.ok(diagnostics.planningPhaseTimings);
+  assert.equal('planningPhaseTimings' in diagnostics, false);
+});
+
+test('objective external timing telemetry reads the clock only when explicitly enabled', () => {
+  const originalPerformance = globalThis.performance;
+  let clockReads = 0;
+  globalThis.performance = {
+    now() {
+      clockReads += 1;
+      return clockReads;
+    },
+  };
+  try {
+    const ordinaryDiagnostics = {};
+    assert.equal(objectiveCoverageExternalPlacement([], [], {
+      diagnostics: ordinaryDiagnostics,
+    }), null);
+    assert.equal(clockReads, 0);
+    assert.equal('planningPhaseTimings' in ordinaryDiagnostics, false);
+
+    const detailedDiagnostics = {};
+    assert.equal(objectiveCoverageExternalPlacement([], [], {
+      diagnostics: detailedDiagnostics,
+      collectDetailedPlannerTelemetry: true,
+    }), null);
+    assert.ok(clockReads > 0);
+    assert.ok(detailedDiagnostics.planningPhaseTimings);
+  } finally {
+    globalThis.performance = originalPerformance;
+  }
 });
 
 test('objective composition preselects only exact shell-clear tiered connector slices', () => {
@@ -3667,6 +3696,29 @@ test('route-shape signature memo reuses only immutable socket identity domains',
   assert.notEqual(afterMutation, beforeMutation);
   assert.equal(bypassMemo.stats.nodeSignatureBypasses, 2);
   assert.equal(bypassMemo.stats.nodeSignatureMisses, 0);
+
+  const statlessCandidate = routeShapeFixture().second;
+  const statlessMemo = createRouteShapeNodeGeometrySignatureMemo({
+    collectStats: false,
+  });
+  const statlessFirst = memoizedRouteShapeNodeGeometrySignature(
+    statlessMemo,
+    {
+      candidate: statlessCandidate,
+      availableSockets: statlessCandidate.availableSockets,
+    },
+    { immutable: true, socketDomainToken: 'statless' },
+  );
+  const statlessRepeated = memoizedRouteShapeNodeGeometrySignature(
+    statlessMemo,
+    {
+      candidate: statlessCandidate,
+      availableSockets: statlessCandidate.availableSockets,
+    },
+    { immutable: true, socketDomainToken: 'statless' },
+  );
+  assert.equal(statlessRepeated, statlessFirst);
+  assert.equal(statlessMemo.stats, null);
 });
 
 test('translation-invariant route-shape cache hits reuse booleans only', () => {

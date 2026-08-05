@@ -51,11 +51,21 @@ import {
   generateMagmaRefractorAssayLabRoom,
   MAGMA_REFRACTOR_ASSAY_LAB_MODULE_ID,
 } from './magma/MagmaRefractorAssayLabRoom.js';
-import { augmentDungeonDraft } from './dungeon-augmentation/planner.js';
 import {
+  cloneDungeonAugmentationValue,
   deepFreezeDungeonAugmentationValue,
   hashCanonicalValue,
 } from './dungeon-augmentation/canonical.js';
+import {
+  assertIndustrialV4AuthoredArtifact,
+  DungeonAugmentationAuthoredArtifactError,
+  INDUSTRIAL_V4_AUTHORED_GENERATION_MODE,
+  INDUSTRIAL_V4_AUTHORED_LAYOUT_SEED,
+  INDUSTRIAL_V4_AUTHORED_PROFILE_ID,
+} from './dungeon-augmentation/authored/IndustrialV4AuthoredArtifact.js';
+import {
+  retainRouteNetworkSalvageWitnessCache,
+} from './dungeon-augmentation/RouteNetworkSalvageRetention.js';
 import { dungeonRouteEndpointGridCoordinate } from './dungeon-augmentation/geometry.js';
 import {
   createRouteNetworkConflictEntitySignature,
@@ -86,6 +96,35 @@ import {
   INDUSTRIAL_SUPPLEMENT_V4_RUNTIME_CONTRACT_MODE,
   resolveIndustrialSupplementAnchorPlacementRequests,
 } from './dungeon-augmentation/IndustrialSupplementRuntimeContracts.js';
+
+const verifiedFrozenIndustrialV4Artifacts = new WeakSet();
+
+function hasFrozenIndustrialV4RuntimeEnvelope(artifact) {
+  if (!artifact || typeof artifact !== 'object' || !Object.isFrozen(artifact)) return false;
+  const frozenRecords = (records) => (
+    Array.isArray(records)
+    && Object.isFrozen(records)
+    && records.every((record) => record && typeof record === 'object' && Object.isFrozen(record))
+  );
+  return Object.isFrozen(artifact.overlayPlan)
+    && Object.isFrozen(artifact.materializedLayout)
+    && Object.isFrozen(artifact.materializedLayoutDescriptors)
+    && Object.isFrozen(artifact.validationReceipt)
+    && frozenRecords(artifact.materializedLayout.rooms)
+    && frozenRecords(artifact.materializedLayout.connectionPlans)
+    && frozenRecords(artifact.materializedLayout.connectorJunctionProxies);
+}
+
+function assertIndustrialV4RuntimeArtifact(artifact) {
+  if (verifiedFrozenIndustrialV4Artifacts.has(artifact)) return artifact;
+  const hasFrozenEnvelope = hasFrozenIndustrialV4RuntimeEnvelope(artifact);
+  const verified = assertIndustrialV4AuthoredArtifact(
+    artifact,
+    { profileId: INDUSTRIAL_V4_AUTHORED_PROFILE_ID },
+  );
+  if (hasFrozenEnvelope) verifiedFrozenIndustrialV4Artifacts.add(verified);
+  return verified;
+}
 
 function collectDungeonSupplementRequirementIds(
   plan,
@@ -2515,6 +2554,198 @@ export class DungeonAugmentationIncompatibleContentError extends Error {
   }
 }
 
+export class DungeonAugmentationOfflinePlannerRequiredError extends Error {
+  constructor(profileId = null) {
+    super(
+      'Legacy procedural dungeon augmentation is offline-only and requires an explicitly injected offline planner.',
+    );
+    this.name = 'DungeonAugmentationOfflinePlannerRequiredError';
+    this.code = 'DUNGEON_AUGMENTATION_OFFLINE_PLANNER_REQUIRED';
+    this.status = 'legacy-profile-offline-only';
+    this.reason = 'offline-planner-required';
+    this.profileId = profileId == null ? null : String(profileId);
+  }
+}
+
+export function verifyIndustrialV4AuthoredMaterializedDescriptors(
+  expectedLayout,
+  materializedLayout,
+) {
+  const errors = [];
+  const collections = [
+    ['rooms', 'room'],
+    ['connectionPlans', 'connection'],
+    ['connectorJunctionProxies', 'connector-junction'],
+  ];
+  for (const [field, kind] of collections) {
+    const expected = Array.isArray(expectedLayout?.[field]) ? expectedLayout[field] : [];
+    const actual = Array.isArray(materializedLayout?.[field]) ? materializedLayout[field] : [];
+    const expectedById = new Map();
+    for (const descriptor of expected) {
+      const id = String(descriptor?.id ?? '');
+      if (!id || descriptor?.kind !== kind || expectedById.has(id)) {
+        errors.push({ code: 'authored-materialized-descriptor-invalid', field, id });
+        continue;
+      }
+      expectedById.set(id, descriptor);
+    }
+    const actualIds = new Set();
+    for (const record of actual) {
+      const id = String(record?.id ?? '');
+      if (!id || actualIds.has(id)) {
+        errors.push({ code: 'authored-materialized-runtime-id-invalid', field, id });
+        continue;
+      }
+      actualIds.add(id);
+      const descriptor = expectedById.get(id);
+      if (!descriptor) {
+        errors.push({ code: 'authored-materialized-runtime-record-extra', field, id });
+        continue;
+      }
+      const recordHash = hashCanonicalValue(record, {
+        namespace: `ruindivex-industrial-v4-authored-${kind}-record/v1`,
+      });
+      if (recordHash !== descriptor.recordHash) {
+        errors.push({
+          code: 'authored-materialized-runtime-record-hash-mismatch',
+          field,
+          id,
+          expected: descriptor.recordHash,
+          actual: recordHash,
+        });
+      }
+    }
+    for (const id of expectedById.keys()) {
+      if (!actualIds.has(id)) {
+        errors.push({ code: 'authored-materialized-runtime-record-missing', field, id });
+      }
+    }
+    if (actual.length !== expected.length) {
+      errors.push({
+        code: 'authored-materialized-runtime-count-mismatch',
+        field,
+        expected: expected.length,
+        actual: actual.length,
+      });
+    }
+  }
+  for (const field of [
+    'supplementalRoomIds',
+    'supplementalConnectorJunctionIds',
+    'supplementalConnectionIds',
+    'supplementalPhysicalConnectionIds',
+    'supplementalGraphOnlyConnectionIds',
+  ]) {
+    const expectedHash = hashCanonicalValue(expectedLayout?.[field] ?? [], {
+      namespace: `ruindivex-industrial-v4-authored-${field}/v1`,
+    });
+    const actualHash = hashCanonicalValue(materializedLayout?.[field] ?? [], {
+      namespace: `ruindivex-industrial-v4-authored-${field}/v1`,
+    });
+    if (actualHash !== expectedHash) {
+      errors.push({ code: 'authored-materialized-runtime-id-set-mismatch', field });
+    }
+  }
+  const expectedRouteNetworksHash = hashCanonicalValue(
+    expectedLayout?.diagnostics?.routeNetworks ?? [],
+    { namespace: 'ruindivex-industrial-v4-authored-route-networks/v1' },
+  );
+  const actualRouteNetworksHash = hashCanonicalValue(
+    materializedLayout?.diagnostics?.routeNetworks ?? [],
+    { namespace: 'ruindivex-industrial-v4-authored-route-networks/v1' },
+  );
+  if (expectedRouteNetworksHash !== actualRouteNetworksHash) {
+    errors.push({ code: 'authored-materialized-runtime-route-network-mismatch' });
+  }
+  return deepFreezeDungeonAugmentationValue({
+    schema: 'ruindivex-dungeon-augmentation-authored-descriptor-verification/v1',
+    accepted: errors.length === 0,
+    errors,
+    counts: Object.fromEntries(collections.map(([field]) => [
+      field,
+      materializedLayout?.[field]?.length ?? 0,
+    ])),
+  });
+}
+
+export function verifyIndustrialV4AuthoredMaterializedEnvelope(
+  expectedLayout,
+  materializedLayout,
+) {
+  const errors = [];
+  const collections = [
+    ['rooms', 'room'],
+    ['connectionPlans', 'connection'],
+    ['connectorJunctionProxies', 'connector-junction'],
+  ];
+  for (const [field, kind] of collections) {
+    const expected = Array.isArray(expectedLayout?.[field]) ? expectedLayout[field] : [];
+    const actual = Array.isArray(materializedLayout?.[field]) ? materializedLayout[field] : [];
+    const expectedIds = new Set();
+    for (const descriptor of expected) {
+      const id = String(descriptor?.id ?? '');
+      if (!id || descriptor?.kind !== kind || typeof descriptor?.recordHash !== 'string'
+        || expectedIds.has(id)) {
+        errors.push({ code: 'authored-materialized-descriptor-invalid', field, id });
+      } else {
+        expectedIds.add(id);
+      }
+    }
+    const actualIds = new Set();
+    for (const record of actual) {
+      const id = String(record?.id ?? '');
+      if (!id || actualIds.has(id) || !expectedIds.has(id)) {
+        errors.push({ code: 'authored-materialized-runtime-id-invalid', field, id });
+      } else {
+        actualIds.add(id);
+      }
+    }
+    if (actual.length !== expected.length || actualIds.size !== expectedIds.size) {
+      errors.push({
+        code: 'authored-materialized-runtime-count-mismatch',
+        field,
+        expected: expected.length,
+        actual: actual.length,
+      });
+    }
+  }
+  for (const field of [
+    'supplementalRoomIds',
+    'supplementalConnectorJunctionIds',
+    'supplementalConnectionIds',
+    'supplementalPhysicalConnectionIds',
+    'supplementalGraphOnlyConnectionIds',
+  ]) {
+    const expected = expectedLayout?.[field] ?? [];
+    const actual = materializedLayout?.[field] ?? [];
+    if (!Array.isArray(expected) || !Array.isArray(actual)
+      || expected.length !== actual.length
+      || expected.some((id, index) => String(id) !== String(actual[index]))) {
+      errors.push({ code: 'authored-materialized-runtime-id-set-mismatch', field });
+    }
+  }
+  if (materializedLayout?.recordMode !== 'full-records') {
+    errors.push({
+      code: 'authored-materialized-runtime-record-mode-invalid',
+      actual: materializedLayout?.recordMode ?? null,
+    });
+  }
+  if (materializedLayout?.diagnostics?.accepted !== true) {
+    errors.push({ code: 'authored-materialized-runtime-diagnostics-rejected' });
+  }
+  return deepFreezeDungeonAugmentationValue({
+    schema: 'ruindivex-dungeon-augmentation-authored-envelope-verification/v1',
+    accepted: errors.length === 0,
+    bounded: true,
+    artifactHashCovered: true,
+    errors,
+    counts: Object.fromEntries(collections.map(([field]) => [
+      field,
+      materializedLayout?.[field]?.length ?? 0,
+    ])),
+  });
+}
+
 function supplementRoomFloorMaskCells(room) {
   const authoritativeBaseTier = (room?.augmentationFloorTiers ?? []).find((tier) => (
     tier?.authoritative === true
@@ -3486,10 +3717,17 @@ export class DungeonGenerator {
     augmentationSeed = null,
     basePlanHash = null,
     committedAugmentationIdentity = null,
+    authoredAugmentationArtifact = null,
+    requestedLayoutSeed = null,
     allowInvalidAugmentationPreview = false,
     augmentationRealizationAttemptLimit = DUNGEON_AUGMENTATION_MAX_REALIZATION_ATTEMPTS,
     augmentationPhaseObserver = null,
+    offlineAugmentationPlanner = null,
   } = {}) {
+    if (offlineAugmentationPlanner != null
+      && typeof offlineAugmentationPlanner !== 'function') {
+      throw new TypeError('offlineAugmentationPlanner must be a function or null.');
+    }
     this.tileSize = tileSize;
     this.random = random;
     this.difficulty = Math.max(1, Math.trunc(difficulty) || 1);
@@ -3506,10 +3744,24 @@ export class DungeonGenerator {
       && typeof committedAugmentationIdentity === 'object'
       ? committedAugmentationIdentity
       : null;
+    this.authoredAugmentationArtifact = authoredAugmentationArtifact
+      && typeof authoredAugmentationArtifact === 'object'
+      ? authoredAugmentationArtifact
+      : null;
+    this.requestedLayoutSeed = requestedLayoutSeed == null
+      ? null
+      : String(requestedLayoutSeed);
+    this.geometryDifficulty = this.authoredAugmentationArtifact
+      ? Math.max(
+          1,
+          Math.trunc(this.authoredAugmentationArtifact.canonicalBaseDraft?.difficulty) || 1,
+        )
+      : this.difficulty;
     this.allowInvalidAugmentationPreview = allowInvalidAugmentationPreview === true;
     this.augmentationPhaseObserver = typeof augmentationPhaseObserver === 'function'
       ? augmentationPhaseObserver
       : null;
+    this.offlineAugmentationPlanner = offlineAugmentationPlanner;
     this.augmentationRealizationAttemptLimit = Math.max(
       1,
       Math.min(
@@ -3617,6 +3869,12 @@ export class DungeonGenerator {
           ?? [],
       routeNetworkPlanResultCache:
         this._augmentationRouteNetworkPlanResultCache ?? null,
+      ...(this._augmentationPlannerDiagnosticSink ? {
+        plannerDiagnosticSink: this._augmentationPlannerDiagnosticSink,
+      } : {}),
+      ...(this._augmentationDetailedPlannerTelemetryEnabled === true ? {
+        collectDetailedPlannerTelemetry: true,
+      } : {}),
       difficulty: this.difficulty,
     };
     const requestKey = hashCanonicalValue({
@@ -3648,6 +3906,23 @@ export class DungeonGenerator {
     connectionPlans,
     planningSnapshotOverride = null,
   }) {
+    if (this.authoredAugmentationArtifact) {
+      return this._hydrateIndustrialDungeonFromAuthoredArtifact({
+        rooms,
+        connectionPlans,
+        planningSnapshotOverride,
+      });
+    }
+    const hasProceduralRequest = Boolean(
+      this.augmentationProfileId || this.committedAugmentationIdentity,
+    );
+    if (!hasProceduralRequest) return null;
+    if (!this._preparedDungeonAugmentationPlanningResult
+      && typeof this.offlineAugmentationPlanner !== 'function') {
+      throw new DungeonAugmentationOfflinePlannerRequiredError(
+        this.committedAugmentationIdentity?.profileId ?? this.augmentationProfileId,
+      );
+    }
     // This branch is deliberately before snapshotting, hashing, or seed
     // derivation. The default Industrial path makes no sidecar calls at all.
     const planningContext = this._createIndustrialDungeonAugmentationPlanningContext({
@@ -3694,7 +3969,7 @@ export class DungeonGenerator {
     try {
       result = preparedPlanning
         ? deepFreezeDungeonAugmentationValue(preparedPlanning.result)
-        : augmentDungeonDraft(plannerInput);
+        : this.offlineAugmentationPlanner(plannerInput);
     } finally {
       plannerElapsedMs = preparedPlanning
         ? Math.max(0, Number(preparedPlanning.elapsedMs) || 0)
@@ -3831,6 +4106,228 @@ export class DungeonGenerator {
     };
   }
 
+  _hydrateIndustrialDungeonFromAuthoredArtifact({
+    rooms,
+    connectionPlans,
+    planningSnapshotOverride = null,
+  }) {
+    const artifact = this._verifiedAuthoredAugmentationArtifact
+      === this.authoredAugmentationArtifact
+      ? this._verifiedAuthoredAugmentationArtifact
+      : assertIndustrialV4RuntimeArtifact(this.authoredAugmentationArtifact);
+    const planningSnapshot = planningSnapshotOverride
+      ?? this._createIndustrialDungeonAugmentationPlanningSnapshot({
+        rooms,
+        connectionPlans,
+      });
+    const baseDraft = createIndustrialBaseDraft({
+      rooms: planningSnapshot.rooms,
+      connectionPlans: planningSnapshot.connectionPlans,
+      basePlanHash: artifact.baseGeometryHash,
+      tileSize: this.tileSize,
+      difficulty: this.geometryDifficulty,
+    });
+    const liveBaseGeometryHash = hashCanonicalValue(baseDraft, {
+      namespace: 'ruindivex-industrial-v4-authored-base-geometry/v1',
+      omitKeys: ['basePlanHash', 'planHash'],
+    });
+    if (liveBaseGeometryHash !== artifact.baseGeometryHash) {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_BASE_GEOMETRY_DRIFT',
+        'The live Industrial V1 parent no longer matches the authored V4 base geometry.',
+        {
+          expected: artifact.baseGeometryHash,
+          actual: liveBaseGeometryHash,
+        },
+      );
+    }
+
+    const materializationStartedAt = globalThis.performance?.now?.() ?? Date.now();
+    this._reportDungeonAugmentationPhase('materialization', 'started', {
+      generationMode: artifact.generationMode,
+    });
+    if (artifact.materializedLayout?.recordMode === 'compact-descriptors') {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_FULL_LAYOUT_REQUIRED',
+        'The authored V4 artifact does not contain full pre-materialized runtime records.',
+      );
+    }
+    const materialized = cloneDungeonAugmentationValue(artifact.materializedLayout);
+    const overlayPlan = cloneDungeonAugmentationValue(artifact.overlayPlan);
+    if (materialized.assemblyOverlayPlanRef) {
+      if (materialized.assemblyOverlayPlanRef.augmentationPlanHash
+        !== artifact.overlayPlanHash) {
+        throw new DungeonAugmentationAuthoredArtifactError(
+          'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_OVERLAY_REFERENCE_MISMATCH',
+          'The pre-materialized authored layout references a different overlay plan.',
+        );
+      }
+      materialized.assemblyOverlayPlan = cloneDungeonAugmentationValue(overlayPlan);
+    }
+    const assemblyOverlayPlan = materialized.assemblyOverlayPlan ?? null;
+    if (assemblyOverlayPlan?.augmentationPlanHash !== artifact.overlayPlanHash
+      || assemblyOverlayPlan?.effectivePlanHash !== artifact.effectiveLayoutHash
+      || assemblyOverlayPlan?.basePlanHash !== artifact.baseGeometryHash
+      || (assemblyOverlayPlan?.operations?.length ?? 0) !== 5
+      || (assemblyOverlayPlan?.nodes?.length ?? 0) !== 24
+      || (assemblyOverlayPlan?.segments?.length ?? 0) !== 26) {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_ASSEMBLY_OVERLAY_MISMATCH',
+        'The pre-materialized authored layout does not embed its exact sealed overlay.',
+      );
+    }
+    if (materialized.diagnostics?.accepted !== true) {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_MATERIALIZATION_REJECTED',
+        'The fixed authored V4 overlay could not be materialized.',
+        { errors: materialized.diagnostics?.errors ?? [] },
+      );
+    }
+    const descriptorSource = artifact.materializedLayoutDescriptors
+      ?? artifact.materializedLayout?.descriptors
+      ?? null;
+    const descriptorVerification = descriptorSource
+      ? verifyIndustrialV4AuthoredMaterializedEnvelope(
+          descriptorSource,
+          materialized,
+        )
+      : (() => {
+          const expectedCounts = {
+            rooms: 29,
+            connectionPlans: 47,
+            connectorJunctionProxies: 15,
+            supplementalRoomIds: 16,
+            supplementalConnectionIds: 33,
+            supplementalPhysicalConnectionIds: 26,
+            supplementalGraphOnlyConnectionIds: 7,
+          };
+          const errors = [];
+          for (const [field, expected] of Object.entries(expectedCounts)) {
+            const records = materialized[field];
+            if (!Array.isArray(records) || records.length !== expected) {
+              errors.push({
+                code: 'authored-materialized-runtime-count-mismatch',
+                field,
+                expected,
+                actual: Array.isArray(records) ? records.length : null,
+              });
+            }
+          }
+          for (const field of ['rooms', 'connectionPlans', 'connectorJunctionProxies']) {
+            const ids = (materialized[field] ?? []).map(({ id }) => String(id ?? ''));
+            if (ids.some((id) => !id) || new Set(ids).size !== ids.length) {
+              errors.push({ code: 'authored-materialized-runtime-id-invalid', field });
+            }
+          }
+          return deepFreezeDungeonAugmentationValue({
+            schema: 'ruindivex-dungeon-augmentation-authored-descriptor-verification/v1',
+            accepted: errors.length === 0,
+            artifactHashCovered: true,
+            errors,
+            counts: Object.fromEntries(Object.keys(expectedCounts).map((field) => [
+              field,
+              materialized[field]?.length ?? 0,
+            ])),
+          });
+        })();
+    if (!descriptorVerification.accepted) {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_DESCRIPTOR_MISMATCH',
+        'The materialized authored V4 records do not match the sealed artifact descriptors.',
+        descriptorVerification,
+      );
+    }
+
+    const identity = createDungeonAugmentationSaveIdentity(artifact);
+    const preflightIdentity = this.committedAugmentationIdentity
+      ? createDungeonAugmentationSaveIdentity({
+          ...identity,
+          progressionStateIds: this.committedAugmentationIdentity.progressionStateIds,
+        })
+      : identity;
+    const compatibility = this.committedAugmentationIdentity
+      ? validateCommittedDungeonAugmentationIdentity(
+          this.committedAugmentationIdentity,
+          preflightIdentity,
+        )
+      : {
+          compatible: true,
+          status: 'new-augmentation',
+          resetOrAbandonRequired: false,
+          errors: [],
+        };
+    if (!compatibility.compatible) {
+      throw new DungeonAugmentationIncompatibleContentError(
+        'The saved dungeon augmentation does not match the installed authored V4 artifact. Reset or abandon the expedition to continue.',
+        compatibility,
+      );
+    }
+    const materializationElapsedMs = Math.max(
+      0,
+      (globalThis.performance?.now?.() ?? Date.now()) - materializationStartedAt,
+    );
+    const result = deepFreezeDungeonAugmentationValue({
+      status: 'applied',
+      overlayPlan,
+      diagnostics: {
+        schema: 'ruindivex-dungeon-augmentation-diagnostics/v1',
+        accepted: true,
+        requested: true,
+        reason: 'authored-artifact',
+        generationMode: artifact.generationMode,
+        artifactId: artifact.artifactId,
+        artifactRevision: artifact.artifactRevision,
+        artifactHash: artifact.artifactHash,
+        profileId: artifact.profileId,
+        profileRevision: artifact.profileRevision,
+        basePlanHash: artifact.baseGeometryHash,
+        augmentationPlanHash: artifact.overlayPlanHash,
+        effectivePlanHash: artifact.effectiveLayoutHash,
+        requestedLayoutSeed: this.requestedLayoutSeed,
+        resolvedLayoutSeed: artifact.canonicalLayoutSeed,
+        errors: [],
+        warnings: [],
+      },
+    });
+    const themeBinding = overlayPlan.themeBindings?.[0]?.binding
+      ?? overlayPlan.operations?.[0]?.themeBinding
+      ?? null;
+    const parentRegionId = themeBinding?.parentRegionId
+      ?? overlayPlan.operations?.[0]?.parentRegionId
+      ?? 'industrial-v1:main-region';
+    const host = deepFreezeDungeonAugmentationValue({
+      schema: 'ruindivex-dungeon-augmentation-authored-runtime-host/v1',
+      basePlanHash: artifact.baseGeometryHash,
+      generationMode: artifact.generationMode,
+      extensionRegions: [{
+        id: parentRegionId,
+        themeBinding: cloneDungeonAugmentationValue(themeBinding),
+      }],
+    });
+    return {
+      status: 'applied',
+      baseDraft,
+      host,
+      result,
+      identity,
+      compatibility,
+      materialized,
+      materializationPhaseStartedAt: materializationStartedAt,
+      authoredArtifactReceiptVerified: true,
+      authoredArtifactValidationReceipt: artifact.validationReceipt,
+      diagnostics: {
+        ...result.diagnostics,
+        planningTimeMs: 0,
+        generatorPhaseTimings: {
+          planningMs: 0,
+          materializationMs: materializationElapsedMs,
+        },
+        industrialMaterialization: materialized.diagnostics,
+        descriptorVerification,
+      },
+    };
+  }
+
   _connectorDecorativeArchWidthTiles(plan = null) {
     // V1 keeps its exact authored arch footprint for immutable replay. V4
     // galleries are three physical travel lanes and run collision-derived
@@ -3888,13 +4385,21 @@ export class DungeonGenerator {
       return this._generateAscensionEngineDungeon();
     }
 
-    if (this.augmentationProfileId || this.committedAugmentationIdentity) {
+    if (this.authoredAugmentationArtifact) {
+      return this._generateIndustrialDungeonFromAuthoredArtifact();
+    }
+
+    if ((this.augmentationProfileId || this.committedAugmentationIdentity)
+      && !this.authoredAugmentationArtifact) {
       return this._generateIndustrialDungeonWithAugmentationReplay();
     }
     return this._generateAcceptedIndustrialDungeon();
   }
 
   async generateAsync({ augmentationPlanner = null } = {}) {
+    if (this.authoredAugmentationArtifact) {
+      return this._generateIndustrialDungeonFromAuthoredArtifact();
+    }
     if ((this.augmentationProfileId || this.committedAugmentationIdentity)
       && typeof augmentationPlanner === 'function'
       && this.roomPreviewId == null
@@ -3904,6 +4409,128 @@ export class DungeonGenerator {
       );
     }
     return this.generate();
+  }
+
+  _generateIndustrialDungeonFromAuthoredArtifact() {
+    const artifact = assertIndustrialV4RuntimeArtifact(this.authoredAugmentationArtifact);
+    this._verifiedAuthoredAugmentationArtifact = artifact;
+    if (this.augmentationProfileId && this.augmentationProfileId !== artifact.profileId) {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_PROFILE_MISMATCH',
+        'The requested augmentation profile does not match the authored V4 artifact.',
+      );
+    }
+    if (this.augmentationSeed && this.augmentationSeed !== artifact.canonicalLayoutSeed) {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_SEED_MISMATCH',
+        'Authored V4 geometry must use its canonical resolved layout seed.',
+      );
+    }
+    if (this.basePlanHash && this.basePlanHash !== artifact.baseGeometryHash) {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_BASE_HASH_MISMATCH',
+        'The authored V4 base geometry hash does not match the generation request.',
+      );
+    }
+    if (Number(this.tileSize) !== Number(artifact.canonicalBaseDraft?.tileSize)) {
+      throw new DungeonAugmentationAuthoredArtifactError(
+        'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_TILE_SIZE_MISMATCH',
+        'The authored V4 artifact was compiled for a different Industrial tile size.',
+      );
+    }
+
+    this.augmentationProfileId = artifact.profileId;
+    this.augmentationSeed = artifact.canonicalLayoutSeed;
+    this.basePlanHash = artifact.baseGeometryHash;
+    const tape = artifact.canonicalBaseRandomTape;
+    const sourceRandom = this.random;
+    const gameplayDifficulty = this.difficulty;
+    let tapeCursor = 0;
+    let dungeon = null;
+    let completed = false;
+    this.difficulty = this.geometryDifficulty;
+    this.random = () => {
+      if (tapeCursor >= tape.length) {
+        throw new DungeonAugmentationAuthoredArtifactError(
+          'DUNGEON_AUGMENTATION_AUTHORED_RANDOM_TAPE_EXHAUSTED',
+          `Authored V4 consumed more than ${tape.length} canonical random values.`,
+          { tapeLength: tape.length, consumed: tapeCursor },
+        );
+      }
+      const value = tape[tapeCursor];
+      tapeCursor += 1;
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value >= 1) {
+        throw new DungeonAugmentationAuthoredArtifactError(
+          'DUNGEON_AUGMENTATION_AUTHORED_RANDOM_TAPE_INVALID',
+          'Authored V4 contains an invalid canonical random value.',
+          { tapeIndex: tapeCursor - 1, value },
+        );
+      }
+      return value;
+    };
+
+    try {
+      dungeon = this._generateOnce();
+      if (tapeCursor !== tape.length) {
+        throw new DungeonAugmentationAuthoredArtifactError(
+          'DUNGEON_AUGMENTATION_AUTHORED_RANDOM_TAPE_UNDER_CONSUMED',
+          `Authored V4 consumed ${tapeCursor} of ${tape.length} canonical random values.`,
+          { tapeLength: tape.length, consumed: tapeCursor },
+        );
+      }
+      if (dungeon.progression?.validation?.accepted !== true) {
+        throw new DungeonAugmentationAuthoredArtifactError(
+          'DUNGEON_AUGMENTATION_AUTHORED_RUNTIME_PREFLIGHT_REJECTED',
+          'Authored V4 failed renderer-free progression or traversal validation.',
+          { errors: dungeon.progression?.validation?.errors ?? [] },
+        );
+      }
+      const finalized = this._finalizeAcceptedIndustrialDungeon(dungeon, 1);
+      const requestedLayoutSeed = this.requestedLayoutSeed
+        ?? artifact.canonicalLayoutSeed;
+      const instanceHash = hashCanonicalValue({
+        schema: 'ruindivex-dungeon-augmentation-authored-instance/v1',
+        baseGeometryHash: artifact.baseGeometryHash,
+        overlayPlanHash: artifact.overlayPlanHash,
+        effectiveLayoutHash: artifact.effectiveLayoutHash,
+        materializedLayoutHash: artifact.materializedLayoutHash,
+        bossProfileId: this.bossProfileId,
+        difficulty: gameplayDifficulty,
+        gameplayTuningRevision: artifact.gameplayTuningRevision,
+      }, { namespace: 'ruindivex-dungeon-augmentation-authored-instance/v1' });
+      finalized.layoutSeed = artifact.canonicalLayoutSeed;
+      finalized.requestedLayoutSeed = requestedLayoutSeed;
+      finalized.resolvedLayoutSeed = artifact.canonicalLayoutSeed;
+      finalized.augmentationInstanceHash = instanceHash;
+      finalized.augmentationDiagnostics = {
+        ...(finalized.augmentationDiagnostics ?? {}),
+        generationMode: INDUSTRIAL_V4_AUTHORED_GENERATION_MODE,
+        artifactId: artifact.artifactId,
+        artifactRevision: artifact.artifactRevision,
+        artifactHash: artifact.artifactHash,
+        requestedLayoutSeed,
+        resolvedLayoutSeed: artifact.canonicalLayoutSeed,
+        gameplayDifficulty,
+        geometryDifficulty: this.geometryDifficulty,
+        augmentationInstanceHash: instanceHash,
+      };
+      finalized.augmentationReplayDiagnostics = {
+        schema: 'ruindivex-dungeon-augmentation-authored-runtime-diagnostics/v1',
+        accepted: true,
+        authoredArtifact: true,
+        fallbackToAcceptedBase: false,
+        planningPasses: [],
+        runtimePruningPasses: 0,
+        randomCallCount: tape.length,
+        consumedRandomCallCount: tapeCursor,
+      };
+      completed = true;
+      return finalized;
+    } finally {
+      this.random = sourceRandom;
+      this.difficulty = gameplayDifficulty;
+      if (!completed && dungeon) this._disposeGeneratedDungeonCandidate(dungeon);
+    }
   }
 
   _finalizeAcceptedIndustrialDungeon(dungeon, generationAttempts) {
@@ -4400,6 +5027,14 @@ export class DungeonGenerator {
               (globalThis.performance?.now?.() ?? Date.now()) - replayTransactionStartedAt,
             ),
           };
+          if (augmentedDungeon.augmentationMetrics) {
+            augmentedDungeon.augmentationMetrics.cumulativePlanningTimeMs =
+              augmentedDungeon.augmentationReplayDiagnostics.cumulativePlanningTimeMs;
+            augmentedDungeon.augmentationMetrics.planningPassCount =
+              augmentedDungeon.augmentationReplayDiagnostics.planningPasses.length;
+            augmentedDungeon.augmentationMetrics.buildTransactionTimeMs =
+              augmentedDungeon.augmentationReplayDiagnostics.transactionTimeMs;
+          }
           disposeCandidate(baseDungeon, augmentedDungeon);
           baseDungeonOwned = false;
           activeAugmentedDungeon = null;
@@ -4737,13 +5372,25 @@ export class DungeonGenerator {
   }
 
   _generateIndustrialDungeonWithAugmentationReplay() {
+    if (typeof this.offlineAugmentationPlanner !== 'function') {
+      throw new DungeonAugmentationOfflinePlannerRequiredError(
+        this.committedAugmentationIdentity?.profileId ?? this.augmentationProfileId,
+      );
+    }
     const steps = this._generateIndustrialDungeonWithAugmentationReplaySteps();
     let iteration = steps.next();
     while (!iteration.done) {
       const planningRequest = iteration.value;
       const plannerStartedAt = globalThis.performance?.now?.() ?? Date.now();
       try {
-        const result = augmentDungeonDraft(planningRequest.plannerInput);
+        const result = this.offlineAugmentationPlanner(planningRequest.plannerInput);
+        // Match the request-scoped worker boundary before an exact repair:
+        // completed candidate graphs die with this pass; only cloned,
+        // explicitly bounded salvage-witness arrays survive into the next
+        // same-seed planner request.
+        retainRouteNetworkSalvageWitnessCache(
+          planningRequest.plannerInput.routeNetworkPlanResultCache,
+        );
         iteration = steps.next({
           requestKey: planningRequest.requestKey,
           result,
@@ -5618,7 +6265,8 @@ export class DungeonGenerator {
       unvariedConnectionPlans,
       connectionPlans,
     );
-    if (this.augmentationProfileId || this.committedAugmentationIdentity) {
+    if ((this.augmentationProfileId || this.committedAugmentationIdentity)
+      && !this.authoredAugmentationArtifact) {
       // The sidecar must reserve the exact authored gallery footprint that
       // Industrial will realize later, including widened turns and the lower
       // aprons of slopes/ladders/lifts. A centerline-only proxy can otherwise
@@ -5685,6 +6333,23 @@ export class DungeonGenerator {
       && augmentationOverlayPlan?.schema === DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA
       && augmentationOverlayPlan?.profileId === 'industrial-supplement-preview-v4'
       && Number(augmentationOverlayPlan?.profileRevision ?? 0) >= 5,
+    );
+    const authoredReceiptBackedPlatformability = Boolean(
+      dungeonAugmentation?.authoredArtifactReceiptVerified === true
+      && dungeonAugmentation?.diagnostics?.descriptorVerification?.accepted === true
+      && dungeonAugmentation?.authoredArtifactValidationReceipt?.accepted === true
+      && [
+        'materialization',
+        'progression',
+        'traversal',
+        'presentation',
+        'seams',
+        'structuralFrames',
+        'verticalTransfers',
+        'returnRoutes',
+      ].every((check) => (
+        dungeonAugmentation.authoredArtifactValidationReceipt?.checks?.[check] === true
+      )),
     );
     if (augmentationApplied) {
       rooms = dungeonAugmentation.materialized.rooms;
@@ -5783,6 +6448,7 @@ export class DungeonGenerator {
       rooms,
       tileConnectionPlans,
       solidZones,
+      { skipLegacyRepairSearch: authoredReceiptBackedPlatformability },
     );
     let floorTiles = [
       ...tiles.values(),
@@ -6848,13 +7514,20 @@ export class DungeonGenerator {
       extraExclusionVolumesByConnectionId: connectorTrackTrapGlobalExclusions,
       },
     );
-    const connectorAssemblyValidation = this._validateConnectorTraversalAssembly({
-      floorTiles,
-      tiles,
-      rooms: connectorAssemblyRooms,
-      connectionPlans: tileConnectionPlans,
-    });
-    floorTiles = this._enforceGeneratedWalkability(floorTiles, rooms);
+    const connectorAssemblyValidation = authoredReceiptBackedPlatformability
+      ? this._validateAuthoredConnectorAssemblyEnvelope({
+          floorTiles,
+          connectionPlans: tileConnectionPlans,
+        })
+      : this._validateConnectorTraversalAssembly({
+          floorTiles,
+          tiles,
+          rooms: connectorAssemblyRooms,
+          connectionPlans: tileConnectionPlans,
+        });
+    floorTiles = authoredReceiptBackedPlatformability
+      ? this._enforceAuthoredGeneratedWalkability(floorTiles, rooms)
+      : this._enforceGeneratedWalkability(floorTiles, rooms);
     this._finalizeRoomVerticalPlans(rooms, floorTiles, legacyConnectionPlans);
     // Anchor placement, gameplay-state binding, and marker stamping are a
     // renderer-free finalization phase. Run it only after connector traps,
@@ -6949,17 +7622,29 @@ export class DungeonGenerator {
       // blueprint solids are all available before Three.js assembly. Reject a
       // structurally attributable network here so same-seed selective repair
       // does not pay to build and dispose an entire renderer facade first.
-      const physicalTopologyPreflight = this._validatePlatformability({
-        floorTiles,
-        rooms: connectorAssemblyRooms,
-        solidZones,
-        segmentBarrierZones: solidZones,
-        connectionPlans: tileConnectionPlans,
-        doors: [],
-        landmarks: {},
-        encounters: [],
-        useSegmentBarriers: true,
-      });
+      const physicalTopologyPreflight = authoredReceiptBackedPlatformability
+        ? {
+            accepted: true,
+            errors: [],
+            warnings: [],
+            details: {
+              accepted: true,
+              receiptBacked: true,
+              runtimeExhaustiveSkipped: true,
+              source: 'sealed-authored-artifact',
+            },
+          }
+        : this._validatePlatformability({
+            floorTiles,
+            rooms: connectorAssemblyRooms,
+            solidZones,
+            segmentBarrierZones: solidZones,
+            connectionPlans: tileConnectionPlans,
+            doors: [],
+            landmarks: {},
+            encounters: [],
+            useSegmentBarriers: true,
+          });
       if (!physicalTopologyPreflight.accepted) {
         const physicalFailureAttribution =
           collectDungeonAugmentationPhysicalFailureAttribution({
@@ -7420,13 +8105,18 @@ export class DungeonGenerator {
     );
     if (augmentationApplied) {
       if (usesAuthoritativeV4Geometry) {
-        const finalAnchorPlacementValidation =
-          this._validateDungeonSupplementAnchorPlacementsAgainstFinalCollision({
-            contract: dungeonSupplementAnchorPlacementContract,
-            floorTiles,
-            solidZones: validationSolidZones,
-            rooms,
-          });
+        const finalAnchorPlacementValidation = authoredReceiptBackedPlatformability
+          ? this._validateAuthoredDungeonSupplementAnchorPlacements({
+              contract: dungeonSupplementAnchorPlacementContract,
+              floorTiles,
+              solidZones: validationSolidZones,
+            })
+          : this._validateDungeonSupplementAnchorPlacementsAgainstFinalCollision({
+              contract: dungeonSupplementAnchorPlacementContract,
+              floorTiles,
+              solidZones: validationSolidZones,
+              rooms,
+            });
         if (!finalAnchorPlacementValidation.accepted) {
           throw new DungeonAugmentationIncompatibleContentError(
             'Final generated collision no longer matches the accepted V4 anchor placement contract.',
@@ -7445,14 +8135,19 @@ export class DungeonGenerator {
       // Theme products and authored landmarks may contribute collision after
       // the renderer-free preflight. Re-run both barrier-aware proofs against
       // the exact final collision candidate before accepting the overlay.
-      criticalDoorValidation = this._validateCriticalDoorChokepoints({
-        floorTiles,
-        rooms,
-        solidZones: validationSolidZones,
-        doors,
-        segmentBarrierZones: validationSegmentBarrierZones,
-        useSegmentBarriers: true,
-      });
+      criticalDoorValidation = authoredReceiptBackedPlatformability
+        ? this._validateAuthoredCriticalDoorAssembly({
+            doors,
+            connectionPlans: tileConnectionPlans,
+          })
+        : this._validateCriticalDoorChokepoints({
+            floorTiles,
+            rooms,
+            solidZones: validationSolidZones,
+            doors,
+            segmentBarrierZones: validationSegmentBarrierZones,
+            useSegmentBarriers: true,
+          });
       connectorEntranceValidation = this._validateConnectorEntranceWalkability({
         floorTiles,
         rooms: connectorAssemblyRooms,
@@ -7677,17 +8372,29 @@ export class DungeonGenerator {
         ],
       };
     }
-    const platformabilityValidation = this._validatePlatformability({
-      floorTiles,
-      rooms: connectorAssemblyRooms,
-      solidZones: validationSolidZones,
-      segmentBarrierZones: validationSegmentBarrierZones,
-      connectionPlans: tileConnectionPlans,
-      doors,
-      landmarks,
-      encounters,
-      useSegmentBarriers: augmentationApplied,
-    });
+    const platformabilityValidation = authoredReceiptBackedPlatformability
+      ? {
+          accepted: true,
+          errors: [],
+          warnings: [],
+          details: {
+            accepted: true,
+            receiptBacked: true,
+            runtimeExhaustiveSkipped: true,
+            source: 'sealed-authored-artifact',
+          },
+        }
+      : this._validatePlatformability({
+          floorTiles,
+          rooms: connectorAssemblyRooms,
+          solidZones: validationSolidZones,
+          segmentBarrierZones: validationSegmentBarrierZones,
+          connectionPlans: tileConnectionPlans,
+          doors,
+          landmarks,
+          encounters,
+          useSegmentBarriers: augmentationApplied,
+        });
     progression.validation = {
       ...progression.validation,
       platformability: platformabilityValidation.details,
@@ -7832,12 +8539,13 @@ export class DungeonGenerator {
         materializationTimeMs:
           dungeonAugmentation.diagnostics.generatorPhaseTimings?.materializationMs ?? null,
         rendererFreeValidationTimeMs,
-        cumulativePlanningTimeMs:
-          dungeon.augmentationReplayDiagnostics?.cumulativePlanningTimeMs ?? null,
-        planningPassCount:
-          dungeon.augmentationReplayDiagnostics?.planningPasses?.length ?? null,
-        buildTransactionTimeMs:
-          dungeon.augmentationReplayDiagnostics?.transactionTimeMs ?? null,
+        // Replay-wide timings are attached by the outer replay transaction
+        // after _generateOnce() returns. They are intentionally pending here;
+        // reading them from a not-yet-created dungeon result used to throw and
+        // abort otherwise valid augmentation assembly.
+        cumulativePlanningTimeMs: null,
+        planningPassCount: null,
+        buildTransactionTimeMs: null,
         assemblyTimeMs: Math.max(
           0,
           (globalThis.performance?.now?.() ?? Date.now())
@@ -7863,6 +8571,15 @@ export class DungeonGenerator {
         triangleCount,
         geometryReferenceCount: geometryReferences.size,
         materialReferenceCount: materialReferences.size,
+        boundedRuntimePreflight: {
+          receiptBacked: authoredReceiptBackedPlatformability,
+          legacyScaffoldRepairSearchSkipped: authoredReceiptBackedPlatformability,
+          criticalDoorExhaustiveSkipped:
+            criticalDoorValidation?.details?.runtimeExhaustiveSkipped === true,
+          anchorGlobalFloodSkipped:
+            dungeonSupplementAnchorPlacementContract.finalCollisionValidation
+              ?.runtimeExhaustiveSkipped === true,
+        },
         localLightRecordCount: dungeonSupplementFragment.localLights?.length ?? 0,
       };
     }
@@ -12279,6 +12996,107 @@ export class DungeonGenerator {
     return floorTiles;
   }
 
+  _validateAuthoredConnectorAssemblyEnvelope({
+    floorTiles = [],
+    connectionPlans = [],
+  } = {}) {
+    const errors = [];
+    const checks = [];
+    const planIds = new Set();
+    const floorByKey = new Map(floorTiles.map((floor) => [
+      this._getFloorTileGraphKey(floor),
+      floor,
+    ]));
+    const floorByPosition = new Map(floorTiles.map((floor) => [
+      `${floor.x},${floor.z}@${Number(floor.elevation ?? 0).toFixed(3)}`,
+      floor,
+    ]));
+    const floorAt = (point, elevation) => floorByPosition.get(
+      `${point?.x},${point?.z}@${Number(elevation ?? 0).toFixed(3)}`,
+    ) ?? null;
+    for (const plan of connectionPlans) {
+      const planId = String(plan?.id ?? '');
+      if (!planId || planIds.has(planId)) {
+        errors.push(`${planId || '(unnamed connector)'} has an invalid physical identity.`);
+        continue;
+      }
+      planIds.add(planId);
+      const sourceElevation = Number(plan.sourceElevation ?? plan.elevation ?? 0);
+      const destinationElevation = Number(plan.destinationElevation ?? sourceElevation);
+      const sourceFloor = floorAt(plan.fromSocket, sourceElevation);
+      const destinationFloor = floorAt(plan.toSocket, destinationElevation);
+      if (!sourceFloor) errors.push(`${planId} has no floor aligned to its source socket.`);
+      if (!destinationFloor) errors.push(`${planId} has no floor aligned to its destination socket.`);
+      errors.push(...(plan.connectorAssemblyErrors ?? []));
+
+      let minimumGalleryWidthTiles = Infinity;
+      let galleryCrossSectionCount = 0;
+      for (const crossSection of plan.galleryCrossSections ?? []) {
+        for (const section of crossSection.sections ?? []) {
+          galleryCrossSectionCount += 1;
+          const elevation = Number(
+            section.elevation ?? plan.sourceElevation ?? plan.elevation ?? 0,
+          );
+          const width = [section.center, ...(section.lateralPoints ?? [])]
+            .filter((point) => floorAt(point, elevation)).length;
+          minimumGalleryWidthTiles = Math.min(minimumGalleryWidthTiles, width);
+          if (width < CONNECTOR_GALLERY_MIN_WIDTH_TILES) {
+            errors.push(`${planId} narrows below three live floor tiles.`);
+          }
+        }
+      }
+      if (!Number.isFinite(minimumGalleryWidthTiles)) minimumGalleryWidthTiles = 0;
+      if (galleryCrossSectionCount === 0) {
+        errors.push(`${planId} has no live gallery cross-sections.`);
+      }
+
+      const authoritativeFloorKeys = isV4SupplementalRoutePlan(plan)
+        ? plan.authoritativeTraversalSpine?.requiredFloorKeys?.map(String) ?? []
+        : [];
+      const missingAuthoritativeFloorKeys = authoritativeFloorKeys.filter((floorKey) => (
+        !floorByKey.has(floorKey)
+      ));
+      const foreignAuthoritativeFloorKeys = authoritativeFloorKeys.filter((floorKey) => {
+        const floor = floorByKey.get(floorKey);
+        return floor && !physicalFloorOwnerIds(floor).map(String).includes(planId);
+      });
+      if (missingAuthoritativeFloorKeys.length || foreignAuthoritativeFloorKeys.length) {
+        errors.push(`${planId} no longer owns its complete authored traversal spine.`);
+      }
+      checks.push({
+        connectionId: planId,
+        variantId: plan.connectorVariantId ?? null,
+        sourceFloorKey: sourceFloor ? this._getFloorTileGraphKey(sourceFloor) : null,
+        destinationFloorKey:
+          destinationFloor ? this._getFloorTileGraphKey(destinationFloor) : null,
+        galleryCrossSectionCount,
+        minimumGalleryWidthTiles,
+        authoritativeFloorCount: authoritativeFloorKeys.length,
+        missingAuthoritativeFloorCount: missingAuthoritativeFloorKeys.length,
+        foreignAuthoritativeFloorCount: foreignAuthoritativeFloorKeys.length,
+      });
+    }
+    return {
+      accepted: errors.length === 0,
+      errors,
+      warnings: [],
+      details: {
+        signedElevationContracts: true,
+        checkedConnectorCount: checks.filter((check) => check.variantId).length,
+        checkedGalleryCount: checks.length,
+        checks,
+        routeNetworkEntityFailures: [],
+        minimumGalleryWidthTiles: Math.min(
+          Infinity,
+          ...checks.map((check) => check.minimumGalleryWidthTiles),
+        ),
+        receiptBacked: true,
+        runtimeExhaustiveSkipped: true,
+        boundedLiveFloorEnvelope: true,
+      },
+    };
+  }
+
   _validateConnectorTraversalAssembly({
     floorTiles = [],
     tiles = new Map(),
@@ -14213,7 +15031,13 @@ export class DungeonGenerator {
     return fullHeightDoorVoidTileKeys;
   }
 
-  _createFactoryLevelTiles(tiles, rooms, connectionPlans = [], solidZones = []) {
+  _createFactoryLevelTiles(
+    tiles,
+    rooms,
+    connectionPlans = [],
+    solidZones = [],
+    { skipLegacyRepairSearch = false } = {},
+  ) {
     const roomById = new Map(rooms.map((room) => [room.id, room]));
     const extraTiles = [];
     const seen = new Set();
@@ -16356,9 +17180,11 @@ export class DungeonGenerator {
     }
 
     this._clearProgressionAccessObstructions(tiles, extraTiles, progressionAccessTileKeys);
-    addScaffoldAccessRamps();
-    ensureRoomScaffoldAccess();
-    ensureUpperSocketOwnerAccess();
+    if (!skipLegacyRepairSearch) {
+      addScaffoldAccessRamps();
+      ensureRoomScaffoldAccess();
+      ensureUpperSocketOwnerAccess();
+    }
     const scaffoldPriorityRoomIds = new Set(
       rooms.filter((room) => room.type === 'conveyor').map((room) => room.id),
     );
@@ -18437,10 +19263,12 @@ export class DungeonGenerator {
       // exact socket cell, so the connector-side facades begin one cell into
       // the declared outside half of the authoritative 3x5 seam. Binding only
       // at `axis` made every downstream replacement of that segment fail for
-      // the same immutable host geometry. Search no farther than the seam's
-      // two outside-depth cells and select the nearest axis with both exact,
-      // connector-owned gallery sides.
-      const gallerySupportAxes = Array.from({ length: 3 }, (_, depth) => (
+      // the same immutable host geometry. A corridor-station socket may be
+      // half-grid anchored, so its second outside-depth cell rounds onto the
+      // third integer axis beyond the boundary socket. Include that final
+      // authoritative seam axis and select the nearest position with both
+      // exact, connector-owned gallery sides.
+      const gallerySupportAxes = Array.from({ length: 4 }, (_, depth) => (
         axis + longitudinalSign * depth
       ));
       for (const supportAxis of gallerySupportAxes) {
@@ -19344,6 +20172,28 @@ export class DungeonGenerator {
     return candidates[0];
   }
 
+  _enforceAuthoredGeneratedWalkability(floorTiles = [], rooms = []) {
+    const startRoom = rooms.find(({ id }) => id === 'hubTown')
+      ?? rooms.find(({ id }) => id === 'expeditionCamp')
+      ?? rooms.find(({ id }) => id === 'entrance')
+      ?? rooms[0]
+      ?? null;
+    const startTile = this._findRoomWalkabilityStartTile(startRoom, floorTiles)
+      ?? floorTiles[0]
+      ?? null;
+    const reachable = this._createReachableFloorTileKeySet(startTile, floorTiles);
+    for (const room of rooms) {
+      if (!room || room.suppressRoomGeometry || RUIN_OPEN_AIR_ROOM_TYPES.has(room.type)) continue;
+      const roomTiles = this._getRoomFloorTiles(room, floorTiles);
+      room.generatedTraversalCoverage = roomTiles.length
+        ? roomTiles.filter((tile) => reachable.has(this._getFloorTileGraphKey(tile))).length
+          / roomTiles.length
+        : 0;
+      room.generatedTraversalCoverageReceiptBacked = true;
+    }
+    return floorTiles;
+  }
+
   _enforceGeneratedWalkability(floorTiles = [], rooms = []) {
     for (const room of rooms) {
       if (!room || room.suppressRoomGeometry || RUIN_OPEN_AIR_ROOM_TYPES.has(room.type)) {
@@ -20120,6 +20970,91 @@ export class DungeonGenerator {
       return intersectsSegment(from, seam) || intersectsSegment(seam, to);
     }
     return intersectsSegment(from, to);
+  }
+
+  _validateAuthoredCriticalDoorAssembly({
+    doors = [],
+    connectionPlans = [],
+  } = {}) {
+    const errors = [];
+    const checks = [];
+    const plansByDoorId = new Map();
+    for (const plan of connectionPlans.filter((candidate) => (
+      candidate?.doorId && !isDungeonGraphOnlyConnection(candidate)
+    ))) {
+      const doorId = String(plan.doorId);
+      if (plansByDoorId.has(doorId)) {
+        errors.push(`${doorId} is assigned to more than one physical connection plan.`);
+      } else {
+        plansByDoorId.set(doorId, plan);
+      }
+    }
+    const doorsById = new Map();
+    for (const door of doors) {
+      const doorId = String(door?.id ?? '');
+      if (!doorId || doorsById.has(doorId)) {
+        errors.push(`${doorId || '(unnamed door)'} has an invalid runtime door identity.`);
+      } else {
+        doorsById.set(doorId, door);
+      }
+    }
+    for (const [doorId, plan] of plansByDoorId) {
+      const door = doorsById.get(doorId);
+      if (!door) {
+        errors.push(`${doorId} has no runtime door for its physical connection plan.`);
+        continue;
+      }
+      const expectedFromRoomId = String(
+        plan.progressionFromRoomId ?? plan.fromSocket?.progressionRoomId ?? plan.fromRoomId ?? '',
+      );
+      const expectedToRoomId = String(
+        plan.progressionToRoomId ?? plan.toSocket?.progressionRoomId ?? plan.toRoomId ?? '',
+      );
+      const identityAccepted = door.connectionPlanId === plan.id
+        && String(door.fromRoomId ?? '') === expectedFromRoomId
+        && String(door.toRoomId ?? '') === expectedToRoomId;
+      if (!identityAccepted) {
+        errors.push(`${doorId} no longer matches its authored physical connection identity.`);
+      }
+      if (door.closed && door.locked) {
+        const thresholdSides = new Set(
+          (door.thresholdWallZones ?? []).map((zone) => zone.thresholdSide),
+        );
+        if (!door.thresholdAnchored) {
+          errors.push(`${doorId} is not anchored to its source-room corridor threshold.`);
+        }
+        if (!thresholdSides.has('left') || !thresholdSides.has('right')) {
+          errors.push(`${doorId} does not retain threshold wall coverage on both sides.`);
+        }
+      }
+      checks.push({
+        doorId,
+        connectionPlanId: plan.id,
+        fromRoomId: door.fromRoomId ?? null,
+        toRoomId: door.toRoomId ?? null,
+        locked: Boolean(door.locked),
+        closed: Boolean(door.closed),
+        thresholdAnchored: Boolean(door.thresholdAnchored),
+        identityAccepted,
+      });
+    }
+    for (const door of doors.filter((candidate) => candidate?.closed && candidate?.locked)) {
+      if (!plansByDoorId.has(String(door.id))) {
+        errors.push(`${door.id} has no authored physical connection plan.`);
+      }
+    }
+    return {
+      accepted: errors.length === 0,
+      errors,
+      warnings: [],
+      details: {
+        checkedDoorCount: checks.length,
+        checks,
+        receiptBacked: true,
+        runtimeExhaustiveSkipped: true,
+        boundedDoorIdentityCheck: true,
+      },
+    };
   }
 
   _validateCriticalDoorChokepoints({
@@ -33478,6 +34413,103 @@ export class DungeonGenerator {
           absoluteRoomElevationCommitted: true,
         };
       }));
+  }
+
+  _validateAuthoredDungeonSupplementAnchorPlacements({
+    contract,
+    floorTiles = [],
+    solidZones = [],
+  } = {}) {
+    if (!contract?.active) {
+      return { active: false, accepted: true, errors: [], placements: [] };
+    }
+    const errors = [];
+    const requests = Array.isArray(contract.requests) ? contract.requests : [];
+    const placements = Array.isArray(contract.placements) ? contract.placements : [];
+    const requestById = new Map(requests.map((request) => [String(request.id), request]));
+    const requestedSupportCellIds = new Set(requests.flatMap((request) => [
+      request.exactSupportCellId,
+      ...(request.allowedSupportCellIds ?? []),
+    ]).filter(Boolean).map(String));
+    const floorsBySupportCellId = new Map();
+    for (const floor of floorTiles) {
+      const supportFloorCellId = floor?.augmentationFloorCellId
+        ?? floor?.augmentationTransferCellId;
+      if (!supportFloorCellId || !requestedSupportCellIds.has(String(supportFloorCellId))) continue;
+      const id = String(supportFloorCellId);
+      if (floorsBySupportCellId.has(id)) {
+        errors.push({ code: 'v4-anchor-authored-support-cell-duplicate', supportFloorCellId: id });
+      } else {
+        floorsBySupportCellId.set(id, floor);
+      }
+    }
+    const occupiedSupportCellIdSets =
+      this._createSolidZoneOccupiedSupportCellIdSets(solidZones);
+    const placedRequestIds = new Set();
+    for (const placement of placements) {
+      const requestId = String(placement?.requestId ?? '');
+      const supportFloorCellId = String(placement?.supportFloorCellId ?? '');
+      const request = requestById.get(requestId);
+      const floor = floorsBySupportCellId.get(supportFloorCellId);
+      if (!request || placedRequestIds.has(requestId)) {
+        errors.push({ code: 'v4-anchor-authored-placement-identity-invalid', requestId });
+        continue;
+      }
+      placedRequestIds.add(requestId);
+      const allowedSupportCellIds = new Set([
+        request.exactSupportCellId,
+        ...(request.allowedSupportCellIds ?? []),
+      ].filter(Boolean).map(String));
+      if (!allowedSupportCellIds.has(supportFloorCellId) || !floor) {
+        errors.push({
+          code: 'v4-anchor-authored-support-cell-missing',
+          requestId,
+          supportFloorCellId,
+        });
+        continue;
+      }
+      const walkable = floor.walkabilityIntent !== 'support-only'
+        && String(floor.type ?? 'floor') !== 'void';
+      const blocked = this._isFloorTileBlockedBySolidZone(
+        floor,
+        solidZones,
+        occupiedSupportCellIdSets,
+      );
+      const expectedPosition = {
+        x: Number(floor.x) * this.tileSize,
+        y: Number(floor.elevation ?? 0),
+        z: Number(floor.z) * this.tileSize,
+      };
+      const positionMatches = !placement.position || (
+        Math.abs(Number(placement.position.x) - expectedPosition.x) <= 0.05
+        && Math.abs(Number(placement.position.y) - expectedPosition.y) <= 0.05
+        && Math.abs(Number(placement.position.z) - expectedPosition.z) <= 0.05
+      );
+      if (!walkable || blocked || !positionMatches) {
+        errors.push({
+          code: 'v4-anchor-authored-support-cell-final-collision-mismatch',
+          requestId,
+          supportFloorCellId,
+          walkable,
+          blocked,
+          positionMatches,
+        });
+      }
+    }
+    for (const requestId of requestById.keys()) {
+      if (!placedRequestIds.has(requestId)) {
+        errors.push({ code: 'v4-anchor-authored-placement-missing', requestId });
+      }
+    }
+    return {
+      active: true,
+      accepted: errors.length === 0 && placements.length === requests.length,
+      placements,
+      errors,
+      receiptBacked: true,
+      runtimeExhaustiveSkipped: true,
+      boundedSupportAndCollisionCheck: true,
+    };
   }
 
   _validateDungeonSupplementAnchorPlacementsAgainstFinalCollision({

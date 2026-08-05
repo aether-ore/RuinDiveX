@@ -13,6 +13,7 @@ import {
   DUNGEON_ROUTE_NETWORK_GRANT_V2_SCHEMA,
   DUNGEON_SELECTION_BAG_FAMILIES,
   DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA,
+  DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA,
   DUNGEON_AUGMENTATION_PROFILES,
   GENERIC_DUNGEON_SUPPLEMENT_GRAMMARS,
   DungeonAugmentationRandom,
@@ -530,6 +531,7 @@ function createReplayLifecycleFixture({ committed = false } = {}) {
     progression: { validation: { accepted: true, errors: [] } },
   };
   const generator = new DungeonGenerator({
+    offlineAugmentationPlanner: augmentDungeonDraft,
     random: sourceRandom,
     augmentationProfileId: 'industrial-supplement-preview-v4',
     augmentationRealizationAttemptLimit: 1,
@@ -2369,6 +2371,11 @@ test('augmentation replay owns and disposes accepted, rejected, and failed candi
     const acceptedDungeon = {
       id: 'accepted',
       augmentationStatus: 'applied',
+      augmentationMetrics: {
+        cumulativePlanningTimeMs: null,
+        planningPassCount: null,
+        buildTransactionTimeMs: null,
+      },
       progression: { validation: { accepted: true, errors: [] } },
     };
     const disposalCalls = [];
@@ -2378,6 +2385,13 @@ test('augmentation replay owns and disposes accepted, rejected, and failed candi
     };
     assert.equal(generator._generateIndustrialDungeonWithAugmentationReplay(), acceptedDungeon);
     assert.deepEqual(disposalCalls, [['base', 'accepted']]);
+    assert.deepEqual(acceptedDungeon.augmentationMetrics, {
+      cumulativePlanningTimeMs:
+        acceptedDungeon.augmentationReplayDiagnostics.cumulativePlanningTimeMs,
+      planningPassCount: acceptedDungeon.augmentationReplayDiagnostics.planningPasses.length,
+      buildTransactionTimeMs:
+        acceptedDungeon.augmentationReplayDiagnostics.transactionTimeMs,
+    });
   }
 
   {
@@ -2939,6 +2953,7 @@ test(`${VERIFICATION_SEED_COUNT} Industrial generator hooks leave the legacy RNG
 
     const rejectedRandom = { calls: 0, next() { this.calls += 1; return 0.5; } };
     const rejectedGenerator = new DungeonGenerator({
+      offlineAugmentationPlanner: augmentDungeonDraft,
       random: () => rejectedRandom.next(),
       basePlanHash: `industrial-hook:${index}`,
       augmentationSeed: `industrial-hook:${index}`,
@@ -2965,6 +2980,7 @@ test('missing parent theme capabilities and bindings stop realization after one 
   ]) {
     let realizationCalls = 0;
     const generator = new DungeonGenerator({
+      offlineAugmentationPlanner: augmentDungeonDraft,
       random: () => 0.5,
       basePlanHash: `base:non-retryable-theme:${failureCode}`,
       augmentationSeed: `augmentation:non-retryable-theme:${failureCode}`,
@@ -3006,6 +3022,7 @@ test('missing parent theme capabilities and bindings stop realization after one 
 
   let geometryRealizationCalls = 0;
   const retryableGenerator = new DungeonGenerator({
+    offlineAugmentationPlanner: augmentDungeonDraft,
     random: () => 0.5,
     basePlanHash: 'base:retryable-geometry-failure',
     augmentationSeed: 'augmentation:retryable-geometry-failure',
@@ -3054,6 +3071,7 @@ test('invalid augmentation preview acceptance requires both explicit opt-in and 
       },
     };
     const generator = new DungeonGenerator({
+      offlineAugmentationPlanner: augmentDungeonDraft,
       random: () => 0.5,
       basePlanHash: `base:explicit-alpha-gate:${profileId}`,
       augmentationSeed: `augmentation:explicit-alpha-gate:${profileId}`,
@@ -4406,7 +4424,7 @@ test('delegated progression assigns only parent-authorized beats in prerequisite
   )));
 });
 
-test('committed augmentation identity requires exact plans, themes, and stable progression IDs', () => {
+test('procedural overlay identities remain available only for offline diagnostics', () => {
   const fixture = makeFixture();
   const result = augmentDungeonDraft({
     ...fixture,
@@ -4415,18 +4433,16 @@ test('committed augmentation identity requires exact plans, themes, and stable p
   });
   assert.equal(result.status, 'applied');
   const identity = createDungeonAugmentationSaveIdentity(result.overlayPlan);
-  assert.equal(identity.schema, DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA);
+  assert.notEqual(identity.schema, DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA);
+  assert.equal(identity.schema, DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA);
   assert.ok(identity.progressionStateIds.length > 0);
-  assert.deepEqual(sanitizeDungeonAugmentationSaveIdentity(identity), identity);
-  assert.equal(validateCommittedDungeonAugmentationIdentity(identity, identity).compatible, true);
+  assert.equal(sanitizeDungeonAugmentationSaveIdentity(identity), null);
+  const compatibility = validateCommittedDungeonAugmentationIdentity(identity, identity);
+  assert.equal(compatibility.compatible, false);
+  assert.equal(compatibility.status, 'legacy-profile-offline-only');
+  assert.equal(compatibility.resetOrAbandonRequired, true);
+  assert.equal(compatibility.errors.some(({ code }) => (
+    code === 'saved-augmentation-identity-legacy-procedural'
+  )), true);
   assert.equal(validateCommittedDungeonAugmentationIdentity(null, null).status, 'legacy-unaugmented');
-  const changed = JSON.parse(JSON.stringify(identity));
-  changed.themeRevisions[0].revision = 'missing-theme-revision';
-  const incompatible = validateCommittedDungeonAugmentationIdentity(identity, changed);
-  assert.equal(incompatible.compatible, false);
-  assert.equal(incompatible.resetOrAbandonRequired, true);
-  assert.equal(incompatible.errors.some(({ code }) => code === 'augmentation-theme-revisions-mismatch'), true);
-  const unavailable = validateCommittedDungeonAugmentationIdentity(identity, null);
-  assert.equal(unavailable.compatible, false);
-  assert.equal(unavailable.errors.some(({ code }) => code === 'committed-augmentation-content-unavailable'), true);
 });

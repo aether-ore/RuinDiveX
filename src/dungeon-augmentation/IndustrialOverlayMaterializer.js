@@ -6659,9 +6659,15 @@ export function materializeIndustrialOverlay({
   const strictV4ContentContract = overlayPlan.profileId === INDUSTRIAL_SUPPLEMENT_V4_PROFILE_ID;
   const strictV4ReleaseContract = strictV4ContentContract
     && Number(overlayPlan.profileRevision ?? 0) >= 5;
+  const authoredV4ContentContract = strictV4ContentContract
+    && overlayPlan.generationMode === 'authored-artifact'
+    && Number(overlayPlan.profileRevision ?? 0) === 6;
   const supportsParentAnchoredForest = overlayPlan.schema
     === 'ruindivex-dungeon-augmentation-overlay/v2'
-    && Number(overlayPlan.profileRevision ?? 0) === 5;
+    && (
+      Number(overlayPlan.profileRevision ?? 0) === 5
+      || authoredV4ContentContract
+    );
   const supplementRoomNodes = (overlayPlan.nodes ?? []).filter((node) => (
     !isSupplementConnectorJunctionNode(node)
   ));

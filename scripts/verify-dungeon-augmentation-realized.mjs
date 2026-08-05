@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 
 import { DungeonGenerator } from '../src/DungeonGenerator.js';
+import { augmentDungeonDraft } from '../src/dungeon-augmentation/planner.js';
 import { DUNGEON_AUGMENTATION_PROFILES } from '../src/dungeon-augmentation/catalog.js';
 import {
   createDungeonAugmentationCompleteLayoutSignature,
@@ -309,6 +310,7 @@ function runReleaseWorkerWarmup(manifest, targetEntry, phaseReporter) {
   const seededRandom = new SeededRandom(hashSeed(warmupEntry.seed));
   let sourceRandomCalls = 0;
   const generator = new DungeonGenerator({
+    offlineAugmentationPlanner: augmentDungeonDraft,
     random: () => {
       sourceRandomCalls += 1;
       return seededRandom.next();
@@ -492,6 +494,7 @@ while (records.length < seedCount) {
   const seededRandom = new SeededRandom(hashSeed(seed));
   let sourceRandomCalls = 0;
   const generator = new DungeonGenerator({
+    offlineAugmentationPlanner: augmentDungeonDraft,
     random: () => {
       sourceRandomCalls += 1;
       return seededRandom.next();
@@ -548,6 +551,7 @@ while (records.length < seedCount) {
       const disabledRandom = new SeededRandom(hashSeed(seed));
       let disabledSourceRandomCalls = 0;
       const disabledGenerator = new DungeonGenerator({
+        offlineAugmentationPlanner: augmentDungeonDraft,
         random: () => {
           disabledSourceRandomCalls += 1;
           return disabledRandom.next();

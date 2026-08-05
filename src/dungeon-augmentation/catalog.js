@@ -1226,6 +1226,9 @@ export function createDungeonAugmentationProfile(input = {}) {
     allowDelegatedProgression: input.allowDelegatedProgression === true,
     maximumPlanningAttempts: Math.max(1, Number(input.maximumPlanningAttempts ?? 12)),
   };
+  if (typeof input.generationMode === 'string' && input.generationMode.trim()) {
+    profile.generationMode = input.generationMode.trim();
+  }
   if (Array.isArray(input.paddingGrammarPool)) {
     profile.paddingGrammarPool = input.paddingGrammarPool.map((entry) => ({
       id: String(entry.id),
@@ -1415,7 +1418,8 @@ export const INDUSTRIAL_SUPPLEMENT_PREVIEW_V3_PROFILE = createDungeonAugmentatio
 
 export const INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE = createDungeonAugmentationProfile({
   id: 'industrial-supplement-preview-v4',
-  revision: 5,
+  revision: 6,
+  generationMode: 'authored-artifact',
   operationBudget: {
     optionalBranchCount: 0,
     optionalBranchRooms: [0, 0],

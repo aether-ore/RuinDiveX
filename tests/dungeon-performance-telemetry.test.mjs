@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  DUNGEON_PERFORMANCE_TELEMETRY_DEFAULTS,
   DungeonPerformanceTelemetry,
+  dungeonPerformanceFixtureIdentitiesMatch,
   evaluateDungeonRuntimeReleaseGate,
+  isCompleteDungeonPerformanceFixtureIdentity,
 } from '../src/dungeon-augmentation/DungeonPerformanceTelemetry.js';
 
 class FakePerformanceObserver {
@@ -39,9 +42,18 @@ function traversable(objects) {
   };
 }
 
+const completeFixtureIdentity = Object.freeze({
+  worldKind: 'dungeon',
+  layoutSeed: 'layout:performance-fixture',
+  basePlanHash: 'v1-base-performance-fixture',
+  augmentationPlanHash: 'v1-augmentation-performance-fixture',
+  effectivePlanHash: 'v1-effective-performance-fixture',
+});
+
 test('telemetry retains fixed-size frame, subsystem, and occlusion windows', () => {
   let nowMs = 100;
   const telemetry = new DungeonPerformanceTelemetry({
+    enabled: true,
     frameSampleCapacity: 4,
     subsystemSampleCapacity: 3,
     occlusionSampleCapacity: 4,
@@ -70,6 +82,9 @@ test('telemetry retains fixed-size frame, subsystem, and occlusion windows', () 
     p99Ms: 50,
     maxMs: 50,
     lifetimeMax: 50,
+    totalSampleCount: 5,
+    sampleSpanMs: 0,
+    maxSampleGapMs: 0,
   });
   assert.equal(snapshot.subsystemTimings.controllerUpdate.sampleCount, 3);
   assert.equal(snapshot.subsystemTimings.controllerUpdate.p50Ms, 4);
@@ -79,8 +94,64 @@ test('telemetry retains fixed-size frame, subsystem, and occlusion windows', () 
   assert.equal(Object.hasOwn(snapshot.subsystemTimings, 'unbounded-third-name'), false);
 });
 
+test('default telemetry retains 60 seconds at 240 Hz and records the maximum sample gap', () => {
+  let nowMs = 0;
+  const telemetry = new DungeonPerformanceTelemetry({
+    enabled: true,
+    now: () => nowMs,
+    observeLongTasks: false,
+  });
+  const frameDurationMs = 1_000 / 240;
+  for (let index = 0; index < 14_400; index += 1) {
+    nowMs = index * frameDurationMs;
+    telemetry.recordFrame(frameDurationMs);
+    telemetry.recordSubsystem('controllerUpdate', 0.25);
+  }
+
+  const completeWindow = telemetry.getSnapshot();
+  assert.equal(
+    DUNGEON_PERFORMANCE_TELEMETRY_DEFAULTS.frameSampleCapacity,
+    14_400,
+  );
+  assert.equal(
+    DUNGEON_PERFORMANCE_TELEMETRY_DEFAULTS.subsystemSampleCapacity,
+    14_400,
+  );
+  assert.equal(completeWindow.frames.sampleCount, 14_400);
+  assert.equal(completeWindow.frames.totalSampleCount, 14_400);
+  assert.equal(completeWindow.subsystemTimings.controllerUpdate.sampleCount, 14_400);
+  assert.ok(completeWindow.frames.sampleSpanMs >= 59_995);
+  assert.ok(completeWindow.frames.maxSampleGapMs <= frameDurationMs + 1e-9);
+
+  nowMs += 500;
+  telemetry.recordFrame(frameDurationMs);
+  assert.equal(telemetry.getSnapshot().frames.maxSampleGapMs, 500);
+  telemetry.resetSamples();
+  assert.equal(telemetry.getSnapshot().frames.maxSampleGapMs, 0);
+});
+
+test('fixture identity helpers require a complete stable augmented dungeon identity', () => {
+  assert.equal(isCompleteDungeonPerformanceFixtureIdentity(completeFixtureIdentity), true);
+  assert.equal(
+    dungeonPerformanceFixtureIdentitiesMatch(
+      completeFixtureIdentity,
+      structuredClone(completeFixtureIdentity),
+    ),
+    true,
+  );
+  assert.equal(isCompleteDungeonPerformanceFixtureIdentity({
+    ...completeFixtureIdentity,
+    augmentationPlanHash: null,
+  }), false);
+  assert.equal(dungeonPerformanceFixtureIdentitiesMatch(
+    completeFixtureIdentity,
+    { ...completeFixtureIdentity, effectivePlanHash: 'v1-drifted' },
+  ), false);
+});
+
 test('optional long-task observation tracks count, maximum, and total without retaining entries', () => {
   const telemetry = new DungeonPerformanceTelemetry({
+    enabled: true,
     PerformanceObserverClass: FakePerformanceObserver,
     longTaskThresholdMs: 50,
   });
@@ -102,6 +173,7 @@ test('optional long-task observation tracks count, maximum, and total without re
     maxDurationMs: 75,
     thresholdMs: 50,
     observing: true,
+    supported: true,
   });
 
   const observer = FakePerformanceObserver.latest;
@@ -138,7 +210,10 @@ test('diagnostic snapshots collect renderer, scene, light, cull, quality, and re
     activeRoot.traverse(callback);
   };
 
-  const telemetry = new DungeonPerformanceTelemetry({ observeLongTasks: false });
+  const telemetry = new DungeonPerformanceTelemetry({
+    enabled: true,
+    observeLongTasks: false,
+  });
   const quality = { mode: 'Auto', tier: 'Balanced', settings: { dprCap: 1.25 } };
   const snapshot = telemetry.getSnapshot({
     renderer: {
@@ -202,13 +277,30 @@ test('diagnostic snapshots collect renderer, scene, light, cull, quality, and re
 
 test('runtime release gate enforces every fixed-fixture performance limit', () => {
   const passing = {
-    frames: { sampleCount: 600, p95Ms: 33.3, p99Ms: 50 },
-    longTasks: { maxDurationMs: 50 },
+    schema: 'ruindivex-dungeon-performance/v1',
+    provenance: {
+      sampleKind: 'fixed-fixture',
+      fixtureId: 'fixture-hash',
+      fixtureIdentity: completeFixtureIdentity,
+      currentFixtureId: 'fixture-hash',
+      currentFixtureIdentity: completeFixtureIdentity,
+      qualityTier: 'High',
+      warmupCompleted: true,
+      sampleDurationMs: 60_000,
+    },
+    frames: {
+      sampleCount: 1_800,
+      sampleSpanMs: 59_000,
+      maxSampleGapMs: 250,
+      p95Ms: 33.3,
+      p99Ms: 50,
+    },
+    longTasks: { maxDurationMs: 50, supported: true, observing: true },
     subsystemTimings: {
       controllerUpdate: { p95Ms: 10 },
-      cameraOcclusion: { p95Ms: 1.1 },
-      targetScannerLos: { p95Ms: 0.9 },
     },
+    occlusionAndLos: { sampleCount: 600, p95Ms: 2 },
+    quality: { tier: 'High' },
     renderer: { calls: 500 },
     lighting: { visibleLocalLights: 8, shadowCastingLights: 1 },
     occlusionCandidates: { p95: 64 },
@@ -219,20 +311,30 @@ test('runtime release gate enforces every fixed-fixture performance limit', () =
 
   const rejected = evaluateDungeonRuntimeReleaseGate({
     ...passing,
-    frames: { sampleCount: 299, p95Ms: 33.31, p99Ms: 50.01 },
-    longTasks: { maxDurationMs: 50.01 },
+    frames: {
+      sampleCount: 1_799,
+      sampleSpanMs: 58_999,
+      maxSampleGapMs: 250.01,
+      p95Ms: 33.31,
+      p99Ms: 50.01,
+    },
+    longTasks: { maxDurationMs: 50.01, supported: true, observing: true },
     subsystemTimings: {
       controllerUpdate: { p95Ms: 10.01 },
-      cameraOcclusion: { p95Ms: 1.2 },
-      targetScannerLos: { p95Ms: 0.81 },
     },
+    occlusionAndLos: { sampleCount: 599, p95Ms: 2.01 },
+    quality: { tier: 'Balanced' },
     renderer: { calls: 501 },
     lighting: { visibleLocalLights: 9, shadowCastingLights: 2 },
     occlusionCandidates: { p95: 65 },
   });
   assert.equal(rejected.accepted, false);
   assert.deepEqual(rejected.errors, [
+    'qualityTierMatchesCapture',
     'frameSampleCount',
+    'frameSampleSpan',
+    'frameSampleGap',
+    'occlusionAndLosSampleCount',
     'frameP95',
     'frameP99',
     'rendererCalls',
@@ -243,4 +345,78 @@ test('runtime release gate enforces every fixed-fixture performance limit', () =
     'spatialCandidateP95',
     'longTaskMaximum',
   ]);
+
+  const driftedFixture = evaluateDungeonRuntimeReleaseGate({
+    ...passing,
+    provenance: {
+      ...passing.provenance,
+      currentFixtureId: 'drifted-fixture-hash',
+      currentFixtureIdentity: {
+        ...completeFixtureIdentity,
+        effectivePlanHash: 'v1-drifted',
+      },
+    },
+  });
+  assert.deepEqual(driftedFixture.errors, ['stableFixtureProvenance']);
+
+  const incompleteFixture = evaluateDungeonRuntimeReleaseGate({
+    ...passing,
+    provenance: {
+      ...passing.provenance,
+      fixtureIdentity: { ...completeFixtureIdentity, augmentationPlanHash: null },
+      currentFixtureIdentity: { ...completeFixtureIdentity, augmentationPlanHash: null },
+    },
+  });
+  assert.deepEqual(incompleteFixture.errors, [
+    'completeFixtureProvenance',
+    'stableFixtureProvenance',
+  ]);
+});
+
+test('runtime release gate fails closed without supported observation and sample provenance', () => {
+  const result = evaluateDungeonRuntimeReleaseGate({
+    schema: 'ruindivex-dungeon-performance/v1',
+    frames: {
+      sampleCount: 1_800,
+      sampleSpanMs: 59_000,
+      maxSampleGapMs: 16,
+      p95Ms: 10,
+      p99Ms: 12,
+    },
+    longTasks: { maxDurationMs: 0, supported: false, observing: false },
+    subsystemTimings: { controllerUpdate: { p95Ms: 1 } },
+    occlusionAndLos: { sampleCount: 600, p95Ms: 0.5 },
+    quality: { tier: 'High' },
+    renderer: { calls: 1 },
+    lighting: { visibleLocalLights: 1, shadowCastingLights: 1 },
+    occlusionCandidates: { p95: 1 },
+  });
+
+  assert.equal(result.accepted, false);
+  assert.deepEqual(result.errors, [
+    'fixedFixtureProvenance',
+    'completeFixtureProvenance',
+    'stableFixtureProvenance',
+    'qualityTierProvenance',
+    'qualityTierMatchesCapture',
+    'warmedSampleProvenance',
+    'longTaskObservationSupported',
+  ]);
+});
+
+test('combined occlusion and LOS samples are summed within the same recorded frame', () => {
+  const telemetry = new DungeonPerformanceTelemetry({
+    enabled: true,
+    observeLongTasks: false,
+  });
+  telemetry.recordSubsystem('cameraOcclusion', 1.1);
+  telemetry.recordSubsystem('targetScannerLos', 0.9);
+  telemetry.recordFrame(16);
+  telemetry.recordSubsystem('targetScannerLos', 0.4);
+  telemetry.recordFrame(16);
+
+  const snapshot = telemetry.getSnapshot();
+  assert.equal(snapshot.occlusionAndLos.sampleCount, 2);
+  assert.equal(snapshot.occlusionAndLos.p50Ms, 0.4);
+  assert.equal(snapshot.occlusionAndLos.p95Ms, 2);
 });

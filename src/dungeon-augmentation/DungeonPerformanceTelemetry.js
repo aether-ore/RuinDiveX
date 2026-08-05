@@ -1,7 +1,7 @@
-// Retain a complete 60-second release capture at 60 Hz. Subsystems share the
-// same upper bound; 20 Hz occlusion/scanner samples need at most 1,200 slots.
-const DEFAULT_FRAME_SAMPLE_CAPACITY = 3_600;
-const DEFAULT_SUBSYSTEM_SAMPLE_CAPACITY = 3_600;
+// Retain a complete 60-second release capture at up to 240 Hz. Subsystems share
+// the same upper bound; 20 Hz occlusion/scanner samples need at most 1,200 slots.
+const DEFAULT_FRAME_SAMPLE_CAPACITY = 14_400;
+const DEFAULT_SUBSYSTEM_SAMPLE_CAPACITY = 14_400;
 const DEFAULT_OCCLUSION_SAMPLE_CAPACITY = 1_200;
 const DEFAULT_MAX_SUBSYSTEMS = 16;
 const DEFAULT_LONG_TASK_THRESHOLD_MS = 50;
@@ -20,6 +20,31 @@ function percentile(sorted, fraction) {
   if (sorted.length === 0) return 0;
   const index = Math.max(0, Math.ceil(sorted.length * fraction) - 1);
   return sorted[Math.min(index, sorted.length - 1)];
+}
+
+export const DUNGEON_PERFORMANCE_FIXTURE_IDENTITY_FIELDS = Object.freeze([
+  'worldKind',
+  'layoutSeed',
+  'basePlanHash',
+  'augmentationPlanHash',
+  'effectivePlanHash',
+]);
+
+export function isCompleteDungeonPerformanceFixtureIdentity(identity) {
+  if (!identity || identity.worldKind !== 'dungeon') return false;
+  return DUNGEON_PERFORMANCE_FIXTURE_IDENTITY_FIELDS
+    .filter((field) => field !== 'worldKind')
+    .every((field) => (
+      typeof identity[field] === 'string' && identity[field].length > 0
+    ));
+}
+
+export function dungeonPerformanceFixtureIdentitiesMatch(first, second) {
+  return isCompleteDungeonPerformanceFixtureIdentity(first)
+    && isCompleteDungeonPerformanceFixtureIdentity(second)
+    && DUNGEON_PERFORMANCE_FIXTURE_IDENTITY_FIELDS.every((field) => (
+      first[field] === second[field]
+    ));
 }
 
 class BoundedNumericSeries {
@@ -127,6 +152,7 @@ function countSceneObjects(scene) {
  */
 export class DungeonPerformanceTelemetry {
   constructor({
+    enabled = false,
     frameSampleCapacity = DEFAULT_FRAME_SAMPLE_CAPACITY,
     subsystemSampleCapacity = DEFAULT_SUBSYSTEM_SAMPLE_CAPACITY,
     occlusionSampleCapacity = DEFAULT_OCCLUSION_SAMPLE_CAPACITY,
@@ -136,12 +162,20 @@ export class DungeonPerformanceTelemetry {
     PerformanceObserverClass = globalThis.PerformanceObserver,
     observeLongTasks = true,
   } = {}) {
+    this.enabled = enabled === true;
     this.frameSamples = new BoundedNumericSeries(frameSampleCapacity);
     this.subsystemSampleCapacity = positiveInteger(
       subsystemSampleCapacity,
       DEFAULT_SUBSYSTEM_SAMPLE_CAPACITY,
     );
     this.occlusionCandidateSamples = new BoundedNumericSeries(occlusionSampleCapacity);
+    this.occlusionAndLosSamples = new BoundedNumericSeries(occlusionSampleCapacity);
+    this.pendingOcclusionAndLosMs = 0;
+    this.pendingOcclusionAndLosSample = false;
+    this.firstFrameSampleAtMs = null;
+    this.lastFrameSampleAtMs = null;
+    this.maximumFrameSampleGapMs = 0;
+    this.totalFrameSampleCount = 0;
     this.maxSubsystems = positiveInteger(maxSubsystems, DEFAULT_MAX_SUBSYSTEMS);
     this.longTaskThresholdMs = finiteNonNegative(
       longTaskThresholdMs,
@@ -155,7 +189,10 @@ export class DungeonPerformanceTelemetry {
       maxDurationMs: 0,
     };
     this.longTaskObserver = null;
-    if (observeLongTasks) this._installLongTaskObserver(PerformanceObserverClass);
+    this.longTaskObservationSupported = false;
+    if (this.enabled && observeLongTasks) {
+      this._installLongTaskObserver(PerformanceObserverClass);
+    }
   }
 
   _installLongTaskObserver(PerformanceObserverClass) {
@@ -172,6 +209,7 @@ export class DungeonPerformanceTelemetry {
       });
       observer.observe({ type: 'longtask', buffered: true });
       this.longTaskObserver = observer;
+      this.longTaskObservationSupported = true;
       return true;
     } catch {
       this.longTaskObserver = null;
@@ -184,19 +222,44 @@ export class DungeonPerformanceTelemetry {
   }
 
   beginSubsystem() {
-    return this.now();
+    return this.enabled ? this.now() : null;
   }
 
-  endSubsystem(name, startedAtMs, endedAtMs = this.now()) {
+  endSubsystem(name, startedAtMs, endedAtMs = null) {
+    if (!this.enabled) return false;
     if (!Number.isFinite(Number(startedAtMs))) return false;
-    return this.recordSubsystem(name, Math.max(0, Number(endedAtMs) - Number(startedAtMs)));
+    const resolvedEndedAtMs = endedAtMs == null ? this.now() : Number(endedAtMs);
+    return this.recordSubsystem(
+      name,
+      Math.max(0, resolvedEndedAtMs - Number(startedAtMs)),
+    );
   }
 
   recordFrame(durationMs) {
-    return this.frameSamples.add(durationMs);
+    if (!this.enabled) return false;
+    const recorded = this.frameSamples.add(durationMs);
+    if (recorded) {
+      const sampledAtMs = this.now();
+      this.firstFrameSampleAtMs ??= sampledAtMs;
+      if (this.lastFrameSampleAtMs != null) {
+        this.maximumFrameSampleGapMs = Math.max(
+          this.maximumFrameSampleGapMs,
+          Math.max(0, sampledAtMs - this.lastFrameSampleAtMs),
+        );
+      }
+      this.lastFrameSampleAtMs = sampledAtMs;
+      this.totalFrameSampleCount += 1;
+    }
+    if (this.pendingOcclusionAndLosSample) {
+      this.occlusionAndLosSamples.add(this.pendingOcclusionAndLosMs);
+    }
+    this.pendingOcclusionAndLosMs = 0;
+    this.pendingOcclusionAndLosSample = false;
+    return recorded;
   }
 
   recordSubsystem(name, durationMs) {
+    if (!this.enabled) return false;
     if (typeof name !== 'string' || name.length === 0) return false;
     let series = this.subsystems.get(name);
     if (!series) {
@@ -204,16 +267,28 @@ export class DungeonPerformanceTelemetry {
       series = new BoundedNumericSeries(this.subsystemSampleCapacity);
       this.subsystems.set(name, series);
     }
-    return series.add(durationMs);
+    const recorded = series.add(durationMs);
+    if (recorded && ['cameraOcclusion', 'targetScannerLos'].includes(name)) {
+      this.pendingOcclusionAndLosMs += finiteNonNegative(durationMs);
+      this.pendingOcclusionAndLosSample = true;
+    }
+    return recorded;
   }
 
   recordOcclusionCandidateCount(candidateCount) {
-    return this.occlusionCandidateSamples.add(candidateCount);
+    return this.enabled && this.occlusionCandidateSamples.add(candidateCount);
   }
 
   resetSamples() {
     this.frameSamples.reset();
     this.occlusionCandidateSamples.reset();
+    this.occlusionAndLosSamples.reset();
+    this.pendingOcclusionAndLosMs = 0;
+    this.pendingOcclusionAndLosSample = false;
+    this.firstFrameSampleAtMs = null;
+    this.lastFrameSampleAtMs = null;
+    this.maximumFrameSampleGapMs = 0;
+    this.totalFrameSampleCount = 0;
     for (const series of this.subsystems.values()) series.reset();
     this.longTasks.count = 0;
     this.longTasks.totalDurationMs = 0;
@@ -230,6 +305,7 @@ export class DungeonPerformanceTelemetry {
     quality = null,
     retainedResources = null,
     disposableResources = null,
+    provenance = null,
   } = {}) {
     const sceneCounts = countSceneObjects(scene);
     const activeRootCounts = countSceneObjects(activeRoot);
@@ -260,13 +336,22 @@ export class DungeonPerformanceTelemetry {
 
     return {
       schema: 'ruindivex-dungeon-performance/v1',
-      frames: this.frameSamples.summary(),
+      frames: {
+        ...this.frameSamples.summary(),
+        totalSampleCount: this.totalFrameSampleCount,
+        sampleSpanMs: this.firstFrameSampleAtMs == null
+          || this.lastFrameSampleAtMs == null
+          ? 0
+          : Math.max(0, this.lastFrameSampleAtMs - this.firstFrameSampleAtMs),
+        maxSampleGapMs: this.maximumFrameSampleGapMs,
+      },
       longTasks: {
         count: this.longTasks.count,
         totalDurationMs: this.longTasks.totalDurationMs,
         maxDurationMs: this.longTasks.maxDurationMs,
         thresholdMs: this.longTaskThresholdMs,
         observing: Boolean(this.longTaskObserver),
+        supported: this.longTaskObservationSupported,
       },
       subsystemTimings,
       renderer: {
@@ -289,6 +374,7 @@ export class DungeonPerformanceTelemetry {
         hiddenDrawObjects: finiteNonNegative(cullStats?.hiddenDrawObjectCount),
       },
       occlusionCandidates: this.occlusionCandidateSamples.summary({ suffix: '' }),
+      occlusionAndLos: this.occlusionAndLosSamples.summary(),
       scene: sceneCounts,
       activeRoot: activeRootCounts,
       resources: {
@@ -296,6 +382,7 @@ export class DungeonPerformanceTelemetry {
         disposableResourceCount: collectionSize(disposableResources),
       },
       quality: quality == null ? null : structuredClone(quality),
+      provenance: provenance == null ? null : structuredClone(provenance),
     };
   }
 
@@ -314,7 +401,11 @@ export const DUNGEON_PERFORMANCE_TELEMETRY_DEFAULTS = Object.freeze({
 });
 
 export const DUNGEON_RUNTIME_RELEASE_LIMITS = Object.freeze({
-  minimumFrameSamples: 300,
+  minimumFrameSamples: 1_800,
+  minimumOcclusionAndLosSamples: 600,
+  minimumFrameSampleSpanMs: 59_000,
+  minimumSampleDurationMs: 60_000,
+  maximumFrameSampleGapMs: 250,
   frameP95Ms: 33.3,
   frameP99Ms: 50,
   rendererCalls: 500,
@@ -335,12 +426,39 @@ export function evaluateDungeonRuntimeReleaseGate(snapshot, {
   const controllerP95Ms = metric(
     source.subsystemTimings?.controllerUpdate?.p95Ms,
   );
-  const occlusionAndLosP95Ms = metric(
-    source.subsystemTimings?.cameraOcclusion?.p95Ms,
-  ) + metric(source.subsystemTimings?.targetScannerLos?.p95Ms);
+  const occlusionAndLosP95Ms = metric(source.occlusionAndLos?.p95Ms);
+  const supportedTiers = new Set(['High', 'Balanced', 'Performance']);
+  const provenance = source.provenance ?? {};
   const checks = {
+    snapshotSchema: source.schema === 'ruindivex-dungeon-performance/v1',
+    fixedFixtureProvenance: provenance.sampleKind === 'fixed-fixture'
+      && typeof provenance.fixtureId === 'string'
+      && provenance.fixtureId.length > 0,
+    completeFixtureProvenance:
+      isCompleteDungeonPerformanceFixtureIdentity(provenance.fixtureIdentity)
+      && isCompleteDungeonPerformanceFixtureIdentity(provenance.currentFixtureIdentity),
+    stableFixtureProvenance:
+      typeof provenance.currentFixtureId === 'string'
+      && provenance.currentFixtureId === provenance.fixtureId
+      && dungeonPerformanceFixtureIdentitiesMatch(
+        provenance.fixtureIdentity,
+        provenance.currentFixtureIdentity,
+      ),
+    qualityTierProvenance: supportedTiers.has(provenance.qualityTier),
+    qualityTierMatchesCapture: supportedTiers.has(provenance.qualityTier)
+      && source.quality?.tier === provenance.qualityTier,
+    warmedSampleProvenance: provenance.warmupCompleted === true
+      && metric(provenance.sampleDurationMs) >= limits.minimumSampleDurationMs,
+    longTaskObservationSupported: source.longTasks?.supported === true
+      && source.longTasks?.observing === true,
     frameSampleCount: metric(source.frames?.sampleCount)
       >= limits.minimumFrameSamples,
+    frameSampleSpan: metric(source.frames?.sampleSpanMs)
+      >= limits.minimumFrameSampleSpanMs,
+    frameSampleGap: metric(source.frames?.maxSampleGapMs)
+      <= limits.maximumFrameSampleGapMs,
+    occlusionAndLosSampleCount: metric(source.occlusionAndLos?.sampleCount)
+      >= limits.minimumOcclusionAndLosSamples,
     frameP95: metric(source.frames?.p95Ms) <= limits.frameP95Ms,
     frameP99: metric(source.frames?.p99Ms) <= limits.frameP99Ms,
     rendererCalls: metric(source.renderer?.calls) <= limits.rendererCalls,
@@ -365,6 +483,9 @@ export function evaluateDungeonRuntimeReleaseGate(snapshot, {
     checks: Object.freeze(checks),
     measurements: Object.freeze({
       frameSampleCount: metric(source.frames?.sampleCount),
+      frameSampleSpanMs: metric(source.frames?.sampleSpanMs),
+      frameSampleGapMaxMs: metric(source.frames?.maxSampleGapMs),
+      occlusionAndLosSampleCount: metric(source.occlusionAndLos?.sampleCount),
       frameP95Ms: metric(source.frames?.p95Ms),
       frameP99Ms: metric(source.frames?.p99Ms),
       rendererCalls: metric(source.renderer?.calls),
@@ -374,6 +495,7 @@ export function evaluateDungeonRuntimeReleaseGate(snapshot, {
       occlusionAndLosP95Ms,
       spatialCandidateP95: metric(source.occlusionCandidates?.p95),
       longTaskMaxMs: metric(source.longTasks?.maxDurationMs),
+      sampleDurationMs: metric(provenance.sampleDurationMs),
     }),
     limits,
   });

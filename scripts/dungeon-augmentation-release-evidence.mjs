@@ -274,10 +274,28 @@ export const EXPECTED_ROOM_LAYOUT_IDS = Object.freeze(
 );
 
 const EVIDENCE_HASH_NAMESPACE = 'dungeon-augmentation-v4-release-evidence-v1';
-const RELEASE_SOURCE_ROOTS = Object.freeze(['src', 'scripts', 'tests']);
-const RELEASE_SOURCE_FILE_NAMES = new Set(['package.json', 'package-lock.json']);
-const RELEASE_SCRIPT_PATTERN = /(?:dungeon-augmentation|document-dungeon-augmentation)/u;
-const RELEASE_TEST_PATTERN = /dungeon-augmentation|DungeonSupplementAssembler\.test/u;
+const RELEASE_SOURCE_ROOTS = Object.freeze([
+  'src',
+  'scripts',
+  'tests',
+  'assets/models',
+  'assets/textures',
+]);
+const RELEASE_SOURCE_FILE_NAMES = new Set([
+  'index.html',
+  'package.json',
+  'package-lock.json',
+  'playwright.config.js',
+]);
+const RELEASE_SOURCE_EXTENSION_PATTERN = /\.(?:cjs|css|html|js|json|mjs)$/u;
+const RELEASE_ASSET_EXTENSION_PATTERN =
+  /\.(?:dae|fbx|glb|gltf|jpe?g|json|mtl|obj|png|webp)$/u;
+
+export function createReleaseReceiptEnvironment(environment = process.env) {
+  const sanitized = { ...environment };
+  delete sanitized.PLAYWRIGHT_REUSE_EXISTING_SERVER;
+  return sanitized;
+}
 
 function normalizeCanonicalValue(value) {
   if (Array.isArray(value)) return value.map(normalizeCanonicalValue);
@@ -1033,9 +1051,15 @@ async function collectFiles(rootPath) {
 function isReleaseSourceFile(projectRoot, filePath) {
   const relativePath = path.relative(projectRoot, filePath).replaceAll('\\', '/');
   if (RELEASE_SOURCE_FILE_NAMES.has(relativePath)) return true;
-  if (relativePath.startsWith('src/')) return /\.(?:js|mjs|json)$/u.test(relativePath);
-  if (relativePath.startsWith('scripts/')) return RELEASE_SCRIPT_PATTERN.test(relativePath);
-  if (relativePath.startsWith('tests/')) return RELEASE_TEST_PATTERN.test(relativePath);
+  if (relativePath.startsWith('src/')) return RELEASE_SOURCE_EXTENSION_PATTERN.test(relativePath);
+  if (relativePath.startsWith('scripts/')) return RELEASE_SOURCE_EXTENSION_PATTERN.test(relativePath);
+  if (relativePath.startsWith('tests/')) return RELEASE_SOURCE_EXTENSION_PATTERN.test(relativePath);
+  if (relativePath.startsWith('assets/models/')) {
+    return RELEASE_ASSET_EXTENSION_PATTERN.test(relativePath);
+  }
+  if (relativePath.startsWith('assets/textures/')) {
+    return RELEASE_ASSET_EXTENSION_PATTERN.test(relativePath);
+  }
   return false;
 }
 
@@ -1101,8 +1125,12 @@ function readReleaseSourceDirty(projectRoot) {
     'src',
     'scripts',
     'tests',
+    'assets/models',
+    'assets/textures',
+    'index.html',
     'package.json',
     'package-lock.json',
+    'playwright.config.js',
   ], {
     cwd: projectRoot,
     encoding: 'utf8',

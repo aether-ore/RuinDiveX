@@ -956,6 +956,53 @@ test('parent-anchored salvage of a conflicting segment keeps both independently 
   })), [{ entityId: 'conflicting-span', disposition: 'conflict-root' }]);
 });
 
+test('parent-anchored salvage can omit one exact parent attachment and retain the opposite root', () => {
+  const planned = createSalvageGraphCandidate({
+    endpointSocketIds: ['parent:west', 'parent:east'],
+    nodes: [{ id: 'west-room' }, { id: 'east-room' }],
+    edges: [{ id: 'parent-west', from: { parent: 'parent:west' }, to: 'west-room' }, {
+      id: 'west-east', from: 'west-room', to: 'east-room',
+    }, {
+      id: 'parent-east', from: 'east-room', to: { parent: 'parent:east' },
+    }],
+  });
+  planned.operation.routeNetworkKind = 'objective-route-coverage';
+  planned.operation.coverage = {
+    logicalEdgeId: 'keycard-to-trap',
+    coverageComplete: true,
+  };
+  const exclusion = exactConflictExclusion(planned, 'segment', 'parent-west');
+  exclusion.reason = 'route-network-structural-frame-wall-run-missing';
+  const salvaged = createParentAnchoredRouteNetworkSalvage(planned, [exclusion]);
+
+  assert.equal(salvaged.error, undefined);
+  assert.deepEqual(salvaged.operation.nodeIds, ['west-room', 'east-room']);
+  assert.deepEqual(salvaged.operation.segmentIds, ['west-east', 'parent-east']);
+  assert.deepEqual(salvaged.operation.endpointSocketIds, ['parent:east']);
+  assert.deepEqual(salvaged.operation.omittedEndpointSocketIds, ['parent:west']);
+  assert.deepEqual(salvaged.operation.coverage, planned.operation.coverage);
+  assert.equal(salvaged.operation.authoredCoverageRealized, false);
+  assert.equal(salvaged.operation.localProgressionArcRealized, false);
+  assert.deepEqual(salvaged.operation.parentAnchoredComponents.map((component) => ({
+    root: component.attachmentSocketId,
+    nodes: component.nodeIds,
+    segments: component.segmentIds,
+  })), [{
+    root: 'parent:east',
+    nodes: ['west-room', 'east-room'],
+    segments: ['west-east', 'parent-east'],
+  }]);
+  assert.deepEqual(salvaged.routeNetworkEntityOmissions.map((entry) => ({
+    entityId: entry.entityId,
+    disposition: entry.disposition,
+    reason: entry.reason,
+  })), [{
+    entityId: 'parent-west',
+    disposition: 'conflict-root',
+    reason: 'route-network-structural-frame-wall-run-missing',
+  }]);
+});
+
 test('parent-anchored salvage retains a safe deterministic multi-root merge', () => {
   const planned = createSalvageGraphCandidate({
     endpointSocketIds: ['parent:west', 'parent:east'],

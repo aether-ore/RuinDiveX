@@ -2,6 +2,7 @@ import {
   DUNGEON_AUGMENTATION_OVERLAY_SCHEMA,
   DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
   DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA,
+  DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA,
 } from './contracts.js';
 import {
   canonicalStringify,
@@ -10,8 +11,22 @@ import {
 import { computeEffectiveDungeonPlanHash } from './validation.js';
 import { normalizeRouteNetworkConflictExclusions } from './routeNetworkModulePruning.js';
 
+const AUTHORED_ARTIFACT_GENERATION_MODE = 'authored-artifact';
+const INDUSTRIAL_V4_PROFILE_ID = 'industrial-supplement-preview-v4';
+const INDUSTRIAL_V4_PROFILE_REVISION = 6;
+const INDUSTRIAL_V4_ARTIFACT_ID = 'industrial-v4-authored-r1';
+const INDUSTRIAL_V4_ARTIFACT_REVISION = 1;
+const INDUSTRIAL_V4_GAMEPLAY_TUNING_REVISION = 1;
+const INDUSTRIAL_V4_RESOLVED_LAYOUT_SEED = 'layout:industrial-v4-authored-r1';
+const AUTHORED_ARTIFACT_SCHEMA = 'ruindivex-dungeon-augmentation-authored-artifact/v1';
+
 function stringValue(value) {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function positiveInteger(value) {
+  const normalized = Number(value);
+  return Number.isInteger(normalized) && normalized > 0 ? normalized : 0;
 }
 
 function normalizeThemeRevision(entry = {}) {
@@ -172,11 +187,26 @@ function normalizeMutableState(value, allowedStateIds) {
 
 function identityInputFromOverlay(plan, options = {}) {
   return {
+    generationMode: options.generationMode ?? plan.generationMode,
+    artifactId: options.artifactId ?? plan.artifactId,
+    artifactRevision: options.artifactRevision ?? plan.artifactRevision,
     profileId: plan.profileId,
-    seed: options.seed ?? plan.augmentationSeed ?? plan.layoutSeed,
-    basePlanHash: plan.basePlanHash,
-    augmentationPlanHash: plan.augmentationPlanHash,
-    effectivePlanHash: plan.effectivePlanHash,
+    profileRevision: options.profileRevision ?? plan.profileRevision,
+    gameplayTuningRevision:
+      options.gameplayTuningRevision ?? plan.gameplayTuningRevision,
+    resolvedLayoutSeed: options.resolvedLayoutSeed
+      ?? plan.resolvedLayoutSeed
+      ?? plan.canonicalLayoutSeed
+      ?? plan.augmentationSeed
+      ?? plan.layoutSeed,
+    seed: options.seed
+      ?? plan.resolvedLayoutSeed
+      ?? plan.canonicalLayoutSeed
+      ?? plan.augmentationSeed
+      ?? plan.layoutSeed,
+    basePlanHash: plan.basePlanHash ?? plan.baseGeometryHash,
+    augmentationPlanHash: plan.augmentationPlanHash ?? plan.overlayPlanHash,
+    effectivePlanHash: plan.effectivePlanHash ?? plan.effectiveLayoutHash,
     themeRevisions: plan.themeBindings?.map(({ binding }) => ({
       parentRegionId: binding.parentRegionId,
       themeRef: binding.themeRef,
@@ -191,13 +221,45 @@ function identityInputFromOverlay(plan, options = {}) {
   };
 }
 
-export function createDungeonAugmentationSaveIdentity(input = {}) {
-  const source = [
+function identityInputFromAuthoredArtifact(artifact) {
+  const overlayPlan = artifact.overlayPlan ?? {};
+  const materializedLayout = artifact.materializedLayout ?? {};
+  return {
+    ...identityInputFromOverlay(overlayPlan, {
+      generationMode: artifact.generationMode,
+      artifactId: artifact.artifactId,
+      artifactRevision: artifact.artifactRevision,
+      profileRevision: artifact.profileRevision,
+      gameplayTuningRevision: artifact.gameplayTuningRevision,
+      resolvedLayoutSeed: artifact.canonicalLayoutSeed,
+      seed: artifact.canonicalLayoutSeed,
+      progressionStateIds: collectDungeonAugmentationStableStateIds({
+        ...overlayPlan,
+        connectionPlans: materializedLayout.connectionPlans,
+        stateBindings: materializedLayout.stateBindings,
+      }),
+    }),
+    profileId: artifact.profileId,
+    basePlanHash: artifact.basePlanHash ?? artifact.baseGeometryHash,
+    augmentationPlanHash: artifact.augmentationPlanHash ?? artifact.overlayPlanHash,
+    effectivePlanHash: artifact.effectivePlanHash ?? artifact.effectiveLayoutHash,
+  };
+}
+
+function isOverlayInput(input) {
+  return [
     DUNGEON_AUGMENTATION_OVERLAY_SCHEMA,
     DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
-  ].includes(input?.schema)
-    ? identityInputFromOverlay(input)
-    : input;
+  ].includes(input?.schema);
+}
+
+/**
+ * Offline procedural tooling may still project an overlay into its historical
+ * v1 shape. Such a value is diagnostic-only: the sanitizer and compatibility
+ * validator below will never accept it as resumable content.
+ */
+export function createLegacyDungeonAugmentationSaveIdentity(input = {}) {
+  const source = isOverlayInput(input) ? identityInputFromOverlay(input) : input;
   const progressionStateIds = normalizeProgressionStateIds(source.progressionStateIds);
   const routeNetworkPruningOverrides = normalizeRouteNetworkPruningOverrides(
     source.routeNetworkPruningOverrides,
@@ -207,7 +269,7 @@ export function createDungeonAugmentationSaveIdentity(input = {}) {
   );
   const mutableState = normalizeMutableState(source.mutableState, progressionStateIds);
   const identity = {
-    schema: DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA,
+    schema: DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA,
     profileId: stringValue(source.profileId),
     seed: stringValue(source.seed),
     basePlanHash: stringValue(source.basePlanHash),
@@ -238,6 +300,105 @@ export function createDungeonAugmentationSaveIdentity(input = {}) {
   return deepFreezeDungeonAugmentationValue(identity);
 }
 
+export function createDungeonAugmentationSaveIdentity(input = {}) {
+  if (input?.schema === DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA
+    || (isOverlayInput(input)
+      && input.generationMode !== AUTHORED_ARTIFACT_GENERATION_MODE)) {
+    return createLegacyDungeonAugmentationSaveIdentity(input);
+  }
+  const source = input?.schema === AUTHORED_ARTIFACT_SCHEMA
+    ? identityInputFromAuthoredArtifact(input)
+    : isOverlayInput(input)
+      ? identityInputFromOverlay(input)
+      : input;
+  const progressionStateIds = normalizeProgressionStateIds(source.progressionStateIds);
+  const mutableState = normalizeMutableState(source.mutableState, progressionStateIds);
+  const resolvedLayoutSeed = stringValue(source.resolvedLayoutSeed);
+  const identity = {
+    schema: DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA,
+    generationMode: stringValue(source.generationMode),
+    artifactId: stringValue(source.artifactId),
+    artifactRevision: positiveInteger(source.artifactRevision),
+    profileId: stringValue(source.profileId),
+    profileRevision: positiveInteger(source.profileRevision),
+    gameplayTuningRevision: positiveInteger(source.gameplayTuningRevision),
+    resolvedLayoutSeed,
+    // `seed` remains as a compatibility alias, but it is always the resolved
+    // canonical geometry seed. Requested URL seeds are diagnostics-only.
+    seed: stringValue(source.seed ?? resolvedLayoutSeed),
+    basePlanHash: stringValue(source.basePlanHash),
+    augmentationPlanHash: stringValue(source.augmentationPlanHash),
+    effectivePlanHash: stringValue(source.effectivePlanHash),
+    themeRevisions: normalizeThemeRevisions(source.themeRevisions),
+    progressionStateIds,
+  };
+  if (Object.keys(mutableState).length > 0) identity.mutableState = mutableState;
+  const missing = [
+    'generationMode',
+    'artifactId',
+    'profileId',
+    'resolvedLayoutSeed',
+    'seed',
+    'basePlanHash',
+    'augmentationPlanHash',
+    'effectivePlanHash',
+  ]
+    .filter((key) => !identity[key]);
+  if (missing.length > 0) {
+    throw new TypeError(`Dungeon augmentation save identity is missing: ${missing.join(', ')}.`);
+  }
+  const invalidRevisions = [
+    'artifactRevision',
+    'profileRevision',
+    'gameplayTuningRevision',
+  ].filter((key) => identity[key] <= 0);
+  if (invalidRevisions.length > 0) {
+    throw new TypeError(
+      `Dungeon augmentation save identity has invalid revisions: ${invalidRevisions.join(', ')}.`,
+    );
+  }
+  if (identity.generationMode !== AUTHORED_ARTIFACT_GENERATION_MODE) {
+    throw new TypeError('Only authored-artifact dungeon augmentation identities are resumable.');
+  }
+  if (identity.seed !== identity.resolvedLayoutSeed) {
+    throw new TypeError(
+      'Dungeon augmentation save identity seed must equal its resolved layout seed.',
+    );
+  }
+  if (normalizeRouteNetworkPruningOverrides(source.routeNetworkPruningOverrides).length > 0
+    || normalizeRouteNetworkConflictExclusions(source.routeNetworkConflictExclusions).length > 0) {
+    throw new TypeError(
+      'Authored dungeon augmentation identities cannot contain procedural repair evidence.',
+    );
+  }
+  if (identity.profileId === INDUSTRIAL_V4_PROFILE_ID) {
+    const expected = {
+      generationMode: AUTHORED_ARTIFACT_GENERATION_MODE,
+      artifactId: INDUSTRIAL_V4_ARTIFACT_ID,
+      artifactRevision: INDUSTRIAL_V4_ARTIFACT_REVISION,
+      profileRevision: INDUSTRIAL_V4_PROFILE_REVISION,
+      gameplayTuningRevision: INDUSTRIAL_V4_GAMEPLAY_TUNING_REVISION,
+      resolvedLayoutSeed: INDUSTRIAL_V4_RESOLVED_LAYOUT_SEED,
+    };
+    const mismatches = Object.entries(expected)
+      .filter(([key, value]) => identity[key] !== value)
+      .map(([key]) => key);
+    if (mismatches.length > 0) {
+      throw new TypeError(
+        `Industrial V4 authored identity does not match the installed contract: ${mismatches.join(', ')}.`,
+      );
+    }
+  }
+  const expectedEffectiveHash = computeEffectiveDungeonPlanHash(
+    identity.basePlanHash,
+    identity.augmentationPlanHash,
+  );
+  if (identity.effectivePlanHash !== expectedEffectiveHash) {
+    throw new TypeError('Dungeon augmentation save identity has an inconsistent effective plan hash.');
+  }
+  return deepFreezeDungeonAugmentationValue(identity);
+}
+
 /** Returns a committed identity carrying only allow-listed stable state values. */
 export function withDungeonAugmentationMutableState(value, mutableState = {}, {
   merge = true,
@@ -252,7 +413,7 @@ export function withDungeonAugmentationMutableState(value, mutableState = {}, {
   });
 }
 
-/** Returns a canonical frozen identity or null for untrusted/legacy input. */
+/** Returns a canonical frozen v2 identity or null for untrusted/legacy input. */
 export function sanitizeDungeonAugmentationSaveIdentity(value) {
   if (!value || value.schema !== DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA) return null;
   try {
@@ -262,19 +423,35 @@ export function sanitizeDungeonAugmentationSaveIdentity(value) {
   }
 }
 
-function toIdentity(value) {
-  if (!value) return null;
-  if ([
-    DUNGEON_AUGMENTATION_OVERLAY_SCHEMA,
-    DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
-  ].includes(value.schema)) {
+function classifyIdentity(value) {
+  if (!value) return { kind: 'none', identity: null };
+  if (value.schema === DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA
+    || (isOverlayInput(value)
+      && value.generationMode !== AUTHORED_ARTIFACT_GENERATION_MODE)) {
     try {
-      return createDungeonAugmentationSaveIdentity(value);
+      return {
+        kind: 'legacy-procedural',
+        identity: createLegacyDungeonAugmentationSaveIdentity(value),
+      };
     } catch {
-      return null;
+      return { kind: 'invalid', identity: null };
     }
   }
-  return sanitizeDungeonAugmentationSaveIdentity(value);
+  try {
+    const identity = isOverlayInput(value) || value.schema === AUTHORED_ARTIFACT_SCHEMA
+      ? createDungeonAugmentationSaveIdentity(value)
+      : sanitizeDungeonAugmentationSaveIdentity(value);
+    return identity
+      ? { kind: 'current', identity }
+      : { kind: 'invalid', identity: null };
+  } catch {
+    return { kind: 'invalid', identity: null };
+  }
+}
+
+function toIdentity(value) {
+  const classified = classifyIdentity(value);
+  return classified.kind === 'current' ? classified.identity : null;
 }
 
 /**
@@ -283,8 +460,10 @@ function toIdentity(value) {
  * caller can offer reset/abandon instead of silently removing generated rooms.
  */
 export function validateCommittedDungeonAugmentationIdentity(savedValue, currentValue) {
-  const savedIdentity = toIdentity(savedValue);
-  const currentIdentity = toIdentity(currentValue);
+  const saved = classifyIdentity(savedValue);
+  const current = classifyIdentity(currentValue);
+  const savedIdentity = saved.identity;
+  const currentIdentity = current.identity;
   const errors = [];
   if (!savedValue && !currentValue) {
     return deepFreezeDungeonAugmentationValue({
@@ -296,20 +475,42 @@ export function validateCommittedDungeonAugmentationIdentity(savedValue, current
       currentIdentity: null,
     });
   }
-  if (savedValue && !savedIdentity) {
+  if (saved.kind === 'legacy-procedural') {
+    errors.push({
+      code: 'saved-augmentation-identity-legacy-procedural',
+      message: 'This expedition uses a procedural augmentation identity that is offline-only.',
+    });
+  } else if (savedValue && saved.kind !== 'current') {
     errors.push({ code: 'saved-augmentation-identity-invalid', message: 'The committed augmentation identity is invalid.' });
   }
-  if (currentValue && !currentIdentity) {
+  if (current.kind === 'legacy-procedural') {
+    errors.push({
+      code: 'current-augmentation-identity-legacy-procedural',
+      message: 'The available procedural augmentation identity is offline-only.',
+    });
+  } else if (currentValue && current.kind !== 'current') {
     errors.push({ code: 'current-augmentation-identity-invalid', message: 'The available augmentation identity is invalid.' });
   }
-  if (!savedValue && currentIdentity) {
+  if (!savedValue && current.kind === 'current') {
     errors.push({ code: 'legacy-save-cannot-gain-augmentation', message: 'An unaugmented committed run cannot gain generated rooms during resume.' });
   }
-  if (savedIdentity && !currentValue) {
+  if (saved.kind === 'current' && !currentValue) {
     errors.push({ code: 'committed-augmentation-content-unavailable', message: 'The generated content required by this committed run is unavailable.' });
   }
-  if (savedIdentity && currentIdentity) {
-    for (const key of ['profileId', 'seed', 'basePlanHash', 'augmentationPlanHash', 'effectivePlanHash']) {
+  if (saved.kind === 'current' && current.kind === 'current') {
+    for (const key of [
+      'generationMode',
+      'artifactId',
+      'artifactRevision',
+      'profileId',
+      'profileRevision',
+      'gameplayTuningRevision',
+      'resolvedLayoutSeed',
+      'seed',
+      'basePlanHash',
+      'augmentationPlanHash',
+      'effectivePlanHash',
+    ]) {
       if (savedIdentity[key] !== currentIdentity[key]) {
         errors.push({
           code: `augmentation-${key}-mismatch`,
@@ -326,24 +527,16 @@ export function validateCommittedDungeonAugmentationIdentity(savedValue, current
       !== canonicalStringify(currentIdentity.progressionStateIds)) {
       errors.push({ code: 'augmentation-progression-state-ids-mismatch', message: 'Generated progression identities changed.' });
     }
-    if (canonicalStringify(savedIdentity.routeNetworkPruningOverrides ?? [])
-      !== canonicalStringify(currentIdentity.routeNetworkPruningOverrides ?? [])) {
-      errors.push({
-        code: 'augmentation-route-network-pruning-overrides-mismatch',
-        message: 'Committed route-network pruning overrides do not match available content.',
-      });
-    }
-    if (canonicalStringify(savedIdentity.routeNetworkConflictExclusions ?? [])
-      !== canonicalStringify(currentIdentity.routeNetworkConflictExclusions ?? [])) {
-      errors.push({
-        code: 'augmentation-route-network-conflict-exclusions-mismatch',
-        message: 'Committed route-network conflict exclusions do not match available content.',
-      });
-    }
   }
+  const legacyProcedural = saved.kind === 'legacy-procedural'
+    || current.kind === 'legacy-procedural';
   return deepFreezeDungeonAugmentationValue({
     compatible: errors.length === 0,
-    status: errors.length === 0 ? 'compatible' : 'incompatible-content',
+    status: errors.length === 0
+      ? 'compatible'
+      : legacyProcedural
+        ? 'legacy-profile-offline-only'
+        : 'incompatible-content',
     resetOrAbandonRequired: errors.length > 0,
     errors,
     savedIdentity,

@@ -19,6 +19,7 @@ import {
 } from '../src/dungeon-augmentation/identity.js';
 import {
   DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
+  DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA,
 } from '../src/dungeon-augmentation/contracts.js';
 import {
   computeEffectiveDungeonPlanHash,
@@ -30,6 +31,22 @@ import {
   INDUSTRIAL_SUPPLEMENT_PREVIEW_V3_PROFILE_ID,
   INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
 } from '../src/dungeon-augmentation/IndustrialExtensionHost.js';
+
+const AUTHORED_V4_LAYOUT_SEED = 'layout:industrial-v4-authored-r1';
+
+function createAuthoredV4SaveIdentity(input = {}) {
+  return createDungeonAugmentationSaveIdentity({
+    ...input,
+    generationMode: 'authored-artifact',
+    artifactId: 'industrial-v4-authored-r1',
+    artifactRevision: 1,
+    profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
+    profileRevision: 6,
+    gameplayTuningRevision: 1,
+    resolvedLayoutSeed: AUTHORED_V4_LAYOUT_SEED,
+    seed: AUTHORED_V4_LAYOUT_SEED,
+  });
+}
 
 test('invalid V4 alpha acceptance requires the exact profile id, never an alias', () => {
   const exact = `?dungeonAugmentation=${INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID}`
@@ -413,8 +430,14 @@ test('V4 save identity collects stable state IDs from operations, nodes, segment
   const augmentationPlanHash = 'augmentation:v4-state-identity';
   const identity = createDungeonAugmentationSaveIdentity({
     schema: DUNGEON_AUGMENTATION_OVERLAY_V2_SCHEMA,
+    generationMode: 'authored-artifact',
+    artifactId: 'industrial-v4-authored-r1',
+    artifactRevision: 1,
     profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
-    augmentationSeed: 'layout:v4-state-identity',
+    profileRevision: 6,
+    gameplayTuningRevision: 1,
+    canonicalLayoutSeed: AUTHORED_V4_LAYOUT_SEED,
+    augmentationSeed: AUTHORED_V4_LAYOUT_SEED,
     basePlanHash,
     augmentationPlanHash,
     effectivePlanHash: computeEffectiveDungeonPlanHash(basePlanHash, augmentationPlanHash),
@@ -454,7 +477,7 @@ test('V4 save identity collects stable state IDs from operations, nodes, segment
   ]);
 });
 
-test('V4 save identity canonically persists route-network recovery overrides', () => {
+test('procedural recovery overrides remain readable only in offline v1 identities', () => {
   const basePlanHash = 'base:v4-runtime-pruning';
   const augmentationPlanHash = 'augmentation:v4-runtime-pruning';
   const overlay = {
@@ -499,6 +522,7 @@ test('V4 save identity canonically persists route-network recovery overrides', (
   };
 
   const identity = createDungeonAugmentationSaveIdentity(overlay);
+  assert.equal(identity.schema, DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA);
   assert.deepEqual(identity.routeNetworkPruningOverrides, [
     { grantId: 'grant:alpha', reason: 'route-network-runtime-connector-preflight-failed' },
     { grantId: 'grant:zeta', reason: 'route-network-runtime-connector-preflight-failed' },
@@ -519,35 +543,20 @@ test('V4 save identity canonically persists route-network recovery overrides', (
       reason: 'route-network-runtime-connector-preflight-failed',
     },
   ]);
-  assert.deepEqual(
-    createDungeonAugmentationSaveIdentity(identity),
-    identity,
-    'sanitizing a committed identity retains the exact pruning override set',
-  );
-
-  const incompatible = validateCommittedDungeonAugmentationIdentity(
-    identity,
-    createDungeonAugmentationSaveIdentity({
-      ...identity,
-      routeNetworkPruningOverrides: [],
+  const compatibility = validateCommittedDungeonAugmentationIdentity(identity, identity);
+  assert.equal(compatibility.compatible, false);
+  assert.equal(compatibility.status, 'legacy-profile-offline-only');
+  assert.throws(
+    () => createAuthoredV4SaveIdentity({
+      basePlanHash,
+      augmentationPlanHash,
+      effectivePlanHash: computeEffectiveDungeonPlanHash(basePlanHash, augmentationPlanHash),
+      themeRevisions: [],
+      progressionStateIds: [],
+      routeNetworkPruningOverrides: overlay.routeNetworkPruningOverrides,
     }),
+    /cannot contain procedural repair evidence/u,
   );
-  assert.equal(incompatible.compatible, false);
-  assert.equal(incompatible.errors.some(({ code }) => (
-    code === 'augmentation-route-network-pruning-overrides-mismatch'
-  )), true);
-
-  const conflictIncompatible = validateCommittedDungeonAugmentationIdentity(
-    identity,
-    createDungeonAugmentationSaveIdentity({
-      ...identity,
-      routeNetworkConflictExclusions: [],
-    }),
-  );
-  assert.equal(conflictIncompatible.compatible, false);
-  assert.equal(conflictIncompatible.errors.some(({ code }) => (
-    code === 'augmentation-route-network-conflict-exclusions-mismatch'
-  )), true);
 });
 
 test('augmentation mutable state captures and restores scoped V4 runtime records', () => {
@@ -560,7 +569,7 @@ test('augmentation mutable state captures and restores scoped V4 runtime records
     shortcut: 'operation:coverage:state:shortcut',
     pressurePlate: 'operation:coverage:state:pressure-plate',
   };
-  const identity = createDungeonAugmentationSaveIdentity({
+  const identity = createAuthoredV4SaveIdentity({
     profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
     seed: 'layout:v4-runtime-state',
     basePlanHash,
@@ -723,7 +732,7 @@ test('reward, ladder, and lift restoration remains inside the persisted network 
     reward: 'operation:network-b:state:reward',
     shortcut: 'operation:network-b:state:shortcut',
   };
-  const baseIdentity = createDungeonAugmentationSaveIdentity({
+  const baseIdentity = createAuthoredV4SaveIdentity({
     profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
     seed: 'layout:namespaced-runtime-state',
     basePlanHash: 'base:namespaced-runtime-state',
@@ -851,7 +860,7 @@ test('persisted shortcut replay uses the guarded activation path and normal topo
   const shortcutStateId = 'operation:restore:state:shortcut';
   const rewardStateId = 'supplement:restore:reward';
   const pressureStateId = 'supplement:restore:plate';
-  const baseIdentity = createDungeonAugmentationSaveIdentity({
+  const baseIdentity = createAuthoredV4SaveIdentity({
     profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
     seed: 'layout:guarded-shortcut-restore',
     basePlanHash: 'base:guarded-shortcut-restore',
@@ -979,7 +988,7 @@ test('persisted shortcut replay uses the guarded activation path and normal topo
 
 test('persisted V4 local controls replay only their namespaced hazard scope', () => {
   const mechanismStateId = 'operation:local-control:state:mechanism';
-  const identity = createDungeonAugmentationSaveIdentity({
+  const identity = createAuthoredV4SaveIdentity({
     profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
     seed: 'layout:local-control-restore',
     basePlanHash: 'base:local-control-restore',
@@ -1097,7 +1106,7 @@ test('V4 semantic bindings persist anchor state and lift/ladder state independen
     liftPosition: 'transfer:lift:state:lift-position',
     ladderDeployed: 'transfer:ladder:state:ladder-deployed',
   };
-  const baseIdentity = createDungeonAugmentationSaveIdentity({
+  const baseIdentity = createAuthoredV4SaveIdentity({
     profileId: INDUSTRIAL_SUPPLEMENT_PREVIEW_V4_PROFILE_ID,
     seed: 'layout:semantic-runtime-state',
     basePlanHash: 'base:semantic-runtime-state',

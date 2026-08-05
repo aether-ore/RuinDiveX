@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -42,6 +42,8 @@ import {
   createReleaseAttestation,
   createReleaseArtifactIdentity,
   createReleasePhaseHeartbeatReporter,
+  createReleaseReceiptEnvironment,
+  createReleaseSourceHash,
   createReleaseSuiteReceipt,
   createReleaseWorkerFailureDiagnostics,
   createSeedWorkerEvidence,
@@ -91,6 +93,41 @@ const provenance = Object.freeze({
     revision: RELEASE_PROFILE_REVISION,
     hash: 'sha256-test-profile',
   }),
+});
+
+
+test('release receipt environment removes local server reuse without mutating the source', () => {
+  const source = {
+    KEEP_ME: 'preserved',
+    PLAYWRIGHT_REUSE_EXISTING_SERVER: '1',
+  };
+  const environment = createReleaseReceiptEnvironment(source);
+
+  assert.deepEqual(environment, { KEEP_ME: 'preserved' });
+  assert.deepEqual(source, {
+    KEEP_ME: 'preserved',
+    PLAYWRIGHT_REUSE_EXISTING_SERVER: '1',
+  });
+});
+
+test('release source identity tracks DAE and MTL runtime assets', async () => {
+  const projectRoot = await mkdtemp(path.join(os.tmpdir(), 'dungeon-release-source-hash-'));
+  try {
+    const modelDirectory = path.join(projectRoot, 'assets', 'models', 'fixture');
+    await mkdir(modelDirectory, { recursive: true });
+    await writeFile(path.join(modelDirectory, 'model.dae'), '<COLLADA>first</COLLADA>');
+    await writeFile(path.join(modelDirectory, 'model.mtl'), 'newmtl first');
+    await writeFile(path.join(modelDirectory, 'ignored.txt'), 'not a runtime asset');
+
+    const initial = await createReleaseSourceHash(projectRoot);
+    assert.equal(initial.fileCount, 2);
+
+    await writeFile(path.join(modelDirectory, 'model.mtl'), 'newmtl changed');
+    const changed = await createReleaseSourceHash(projectRoot);
+    assert.notEqual(changed.hash, initial.hash);
+  } finally {
+    await rm(projectRoot, { recursive: true, force: true });
+  }
 });
 
 function createParentWitness(index) {

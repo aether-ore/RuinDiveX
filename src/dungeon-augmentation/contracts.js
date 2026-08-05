@@ -19,7 +19,10 @@ export const DUNGEON_TRANSITION_BAY_SCHEMA = 'ruindivex-dungeon-transition-bay/v
 export const DUNGEON_AUGMENTATION_RESULT_SCHEMA = 'ruindivex-dungeon-augmentation-result/v1';
 export const DUNGEON_AUGMENTATION_DIAGNOSTICS_SCHEMA = 'ruindivex-dungeon-augmentation-diagnostics/v1';
 export const DUNGEON_AUGMENTATION_EFFECTIVE_DRAFT_SCHEMA = 'ruindivex-dungeon-effective-draft-augmentation/v1';
-export const DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA = 'ruindivex-dungeon-augmentation-save-identity/v1';
+export const DUNGEON_AUGMENTATION_SAVE_IDENTITY_V1_SCHEMA =
+  'ruindivex-dungeon-augmentation-save-identity/v1';
+export const DUNGEON_AUGMENTATION_SAVE_IDENTITY_SCHEMA =
+  'ruindivex-dungeon-augmentation-save-identity/v2';
 export const DUNGEON_AUGMENTATION_SCHEMA_REVISION = 1;
 export const DUNGEON_AUGMENTATION_V2_SCHEMA_REVISION = 2;
 

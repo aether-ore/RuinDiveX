@@ -1,240 +1,509 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const gameSource = readFileSync(
-  new URL('../src/Game.js', import.meta.url),
-  'utf8',
-);
-const uiCssSource = readFileSync(
-  new URL('../src/ui.css', import.meta.url),
-  'utf8',
-);
+import {
+  createDungeonAugmentationLoadingState,
+  createOwnedDungeonBuildCancellation,
+  runDungeonAugmentationGenerationTransaction,
+} from '../src/Game.js';
 
-function sourceBetween(startMarker, endMarker) {
-  const start = gameSource.indexOf(startMarker);
-  assert.notEqual(start, -1, `missing source marker: ${startMarker}`);
-  const end = gameSource.indexOf(endMarker, start + startMarker.length);
-  assert.notEqual(end, -1, `missing source marker: ${endMarker}`);
-  return gameSource.slice(start, end);
+class FakeElement {
+  constructor(tagName, ownerDocument = null) {
+    this.tagName = String(tagName).toUpperCase();
+    this.ownerDocument = ownerDocument;
+    this.children = [];
+    this.parentElement = null;
+    this.dataset = {};
+    this.attributes = new Map();
+    this.listeners = new Map();
+    this.hidden = false;
+    this.disabled = false;
+    this.removed = false;
+    this.textContent = '';
+  }
+
+  append(...children) {
+    for (const child of children) this.appendChild(child);
+  }
+
+  appendChild(child) {
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+
+  addEventListener(type, listener) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type).push(listener);
+  }
+
+  async click() {
+    for (const listener of this.listeners.get('click') ?? []) {
+      await listener({ currentTarget: this });
+    }
+  }
+
+  remove() {
+    this.removed = true;
+    if (this.parentElement) {
+      this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+      this.parentElement = null;
+    }
+  }
 }
 
-test('direct dungeon startup prepares the exact committed expedition before Game construction', () => {
-  const createSource = sourceBetween(
-    '  static async create(options = {}) {',
-    '\n  constructor({',
-  );
-  const normalizationSource = sourceBetween(
-    'function normalizeInitialDungeonGenerationSpec(generationSpec = {}) {',
-    '\nfunction shouldPrepareInitialDungeonAugmentation',
-  );
-  const buildWorldSource = sourceBetween(
-    '  _buildWorld() {',
-    '\n  _rebuildDebugLedgeTester(',
-  );
+function createFakeContainer() {
+  const documentHost = {
+    createElement(tagName) {
+      return new FakeElement(tagName, documentHost);
+    },
+  };
+  return new FakeElement('div', documentHost);
+}
 
-  assert.match(createSource, /getActiveBossExpedition\?\.\(\) \?\? null/);
-  assert.match(
-    createSource,
-    /const initialDungeonGenerationSpec = resolveCommittedDungeonGenerationSpec\([\s\S]*?committedExpedition,[\s\S]*?dungeonAugmentation: undefined,[\s\S]*?\);/,
-  );
-  assert.match(
-    createSource,
-    /shouldPrepareInitialDungeonAugmentation\(initialDungeonGenerationSpec\)[\s\S]*?prepareInitialDungeonAugmentation\(\{[\s\S]*?generationSpec: initialDungeonGenerationSpec,/,
-  );
-  assert.match(
-    normalizationSource,
-    /committedAugmentationIdentity: sanitizeDungeonAugmentationSaveIdentity\([\s\S]*?augmentationRequest\.committedAugmentationIdentity,/,
-  );
-  assert.match(normalizationSource, /basePlanHash,[\s\S]*?isCommittedRun:/);
-  assert.match(
-    buildWorldSource,
-    /const dungeonGenerationSpec = resolveCommittedDungeonGenerationSpec\([\s\S]*?const bundle = useOverworld[\s\S]*?: this\._createLegacyDungeonWorldCandidate\(dungeonGenerationSpec\);/,
-  );
-});
-
-test('fail-closed loading presents explicit retry and cancel controls', () => {
-  const loadingStateSource = sourceBetween(
-    'function createDungeonAugmentationLoadingState(container) {',
-    '\nfunction normalizeInitialDungeonGenerationSpec(',
-  );
-
-  assert.match(loadingStateSource, /retry\.textContent = 'Retry';/);
-  assert.match(loadingStateSource, /cancel\.textContent = 'Cancel';/);
-  assert.match(
-    loadingStateSource,
-    /retry\.addEventListener\?\.\('click',[\s\S]*?globalThis\.location\.reload\(\);/,
-  );
-  assert.match(
-    loadingStateSource,
-    /cancel\.addEventListener\?\.\('click', complete\);/,
-  );
-  assert.match(
-    loadingStateSource,
-    /fail\(error\) \{[\s\S]*?actions\.hidden = false;/,
-  );
-  assert.match(uiCssSource, /\.dungeon-augmentation-loading-actions\s*\{/);
-  assert.match(uiCssSource, /\.dungeon-augmentation-loading-actions\[hidden\]\s*\{/);
-  assert.match(uiCssSource, /\.dungeon-augmentation-loading-actions button\s*\{/);
-});
-
-test('prepared startup dungeons are consumed only after canonical request identity matches', () => {
-  const candidateSource = sourceBetween(
-    '  _createLegacyDungeonWorldCandidate({',
-    '\n  _assignMountedWorldBundle(',
-  );
-
-  assert.match(
-    candidateSource,
-    /const preparedRequestKey = normalizeInitialDungeonGenerationSpec\(\{[\s\S]*?\}\)\.requestKey;/,
-  );
-  for (const contract of [
-    'preparedInitialDungeon.requestKey === preparedRequestKey',
-    'preparedInitialDungeon.layoutSeed === layoutSeed',
-    'Number(preparedInitialDungeon.difficulty) === Number(difficulty)',
-    'preparedInitialDungeon.bossProfileId === bossProfileId',
-    'preparedInitialDungeon.dungeonFamilyId === resolvedDungeonFamilyId',
-    'preparedInitialDungeon.basePlanHash === basePlanHash',
-  ]) {
-    assert.ok(candidateSource.includes(contract), `missing prepared-build match: ${contract}`);
+function descendant(root, predicate) {
+  if (predicate(root)) return root;
+  for (const child of root.children ?? []) {
+    const match = descendant(child, predicate);
+    if (match) return match;
   }
-  assert.match(
-    candidateSource,
-    /preparedInitialDungeon\.augmentationProfileId\s*=== augmentationRequest\.augmentationProfileId/,
-  );
-  assert.match(
-    candidateSource,
-    /if \(preparedInitialDungeon && !preparedMatches\) \{[\s\S]*?throw new Error\(/,
-  );
-  assert.match(
-    candidateSource,
-    /if \(!preparedDungeon[\s\S]*?augmentationRequest\.augmentationProfileId[\s\S]*?augmentationRequest\.committedAugmentationIdentity[\s\S]*?DUNGEON_AUGMENTATION_ASYNC_PIPELINE_REQUIRED/,
-    'production augmented generation must not fall through to the synchronous generator',
-  );
+  return null;
+}
+
+const baseRequest = Object.freeze({
+  layoutSeed: 'loading-semantics-seed',
+  difficulty: 1,
+  bossProfileId: 'boss-a',
+  dungeonFamilyId: 'industrial-v1',
+  basePlanHash: 'base-loading-semantics',
 });
 
-test('planner cancellation is rethrown before fallback and candidate creation never mutates the mounted world', () => {
-  const asyncCandidateSource = sourceBetween(
-    '  async _createLegacyDungeonWorldCandidateAsync({',
-    '\n  _createLegacyDungeonWorldCandidate({',
-  );
-  const abortIndex = asyncCandidateSource.indexOf("if (error?.name === 'AbortError')");
-  const committedIndex = asyncCandidateSource.indexOf(
-    'if (augmentationRequest.committedAugmentationIdentity || strictDisposableRun)',
-  );
-  const fallbackIndex = asyncCandidateSource.indexOf('const fallbackStartedAt');
-
-  assert.ok(abortIndex >= 0, 'missing explicit cancellation branch');
-  assert.ok(committedIndex > abortIndex, 'committed rejection must follow cancellation');
-  assert.ok(fallbackIndex > committedIndex, 'authored fallback must follow fail-closed checks');
-  assert.match(
-    asyncCandidateSource.slice(abortIndex, committedIndex),
-    /loadingState\?\.complete\(\);\s*throw error;/,
-  );
-  assert.match(
-    asyncCandidateSource,
-    /if \(candidate\) \{\s*this\._disposeUncommittedWorldCandidate\(candidate\);\s*candidate = null;\s*\}[\s\S]*?if \(error\?\.name === 'AbortError'\)/,
-  );
-  assert.match(
-    asyncCandidateSource,
-    /const dungeon = await generator\.generateAsync\([\s\S]*?generatedDungeon = dungeon;\s*throwIfDungeonBuildAborted\(signal\);/,
-  );
-  assert.match(
-    asyncCandidateSource,
-    /candidate = this\._createLegacyDungeonWorldCandidate\([\s\S]*?generatedDungeon = null;\s*throwIfDungeonBuildAborted\(signal\);[\s\S]*?Object\.defineProperty\(candidate, 'dungeonBuildActivationProgress',[\s\S]*?return candidate;/,
-  );
-  assert.doesNotMatch(asyncCandidateSource, /_assignMountedWorldBundle\(/);
-  assert.doesNotMatch(asyncCandidateSource, /activeWorldBundle\??\.root\??\.removeFromParent/);
+const authoredArtifact = Object.freeze({
+  artifactId: 'industrial-v4-authored-r1',
+  artifactRevision: 1,
+  artifactHash: 'v1-authored-artifact-fixture',
+  generationMode: 'authored-artifact',
+  profileId: 'industrial-supplement-preview-v4',
+  profileRevision: 6,
+  gameplayTuningRevision: 1,
+  canonicalLayoutSeed: 'layout:industrial-v4-authored-r1',
+  baseGeometryHash: 'v1-authored-base',
 });
 
-test('committed builds fail closed while eligible uncommitted failures build an authored parent', () => {
-  const initialPrepareSource = sourceBetween(
-    'async function prepareInitialDungeonAugmentation({',
-    '\nfunction getBusterMagazineRecoveryTime(',
-  );
-  const asyncCandidateSource = sourceBetween(
-    '  async _createLegacyDungeonWorldCandidateAsync({',
-    '\n  _createLegacyDungeonWorldCandidate({',
-  );
+const authoredRequest = Object.freeze({
+  ...baseRequest,
+  augmentationRequest: {
+    augmentationProfileId: 'industrial-supplement-preview-v4',
+    committedAugmentationIdentity: null,
+  },
+});
 
-  assert.match(
-    initialPrepareSource,
-    /augmentationRequest\.committedAugmentationIdentity[\s\S]*?throw error;[\s\S]*?new DungeonGenerator\(\{[\s\S]*?dungeonFamilyId,[\s\S]*?\}\)\.generate\(\)/,
-  );
-  assert.match(
-    asyncCandidateSource,
-    /if \(augmentationRequest\.committedAugmentationIdentity \|\| strictDisposableRun\) \{[\s\S]*?loadingState\?\.fail\(error\);[\s\S]*?throw error;[\s\S]*?const fallbackGenerator = new DungeonGenerator\(\{[\s\S]*?\}\);[\s\S]*?const dungeon = fallbackGenerator\.generate\(\);/,
-  );
-  assert.match(
-    asyncCandidateSource,
-    /fallback: 'authored-parent',[\s\S]*?preparedDungeon: dungeon,/,
-  );
+function authoredAssetPreparation({
+  onDispose = null,
+  onCacheInstall = null,
+  onCacheRelease = null,
+} = {}) {
+  return {
+    receipt: { accepted: true, receiptHash: 'v1-assets-receipt' },
+    metrics: { totalTimeMs: 5, decodedTextureCount: 1, concurrency: 8 },
+    assets: [{ id: 'texture:fixture', uri: '/fixture.png', kind: 'texture', handle: {} }],
+    installIntoCache(cache) {
+      onCacheInstall?.(cache);
+      let disposed = false;
+      return {
+        installedCount: 1,
+        dispose() {
+          if (disposed) return false;
+          disposed = true;
+          onCacheRelease?.();
+          return true;
+        },
+      };
+    },
+    async dispose() { onDispose?.(); },
+  };
+}
 
-  for (const source of [initialPrepareSource, asyncCandidateSource]) {
-    const tryIndex = source.indexOf('try {');
-    const workerStartIndex = source.indexOf(
-      'plannerSession = createDungeonAugmentationBrowserPlannerSession({ signal });',
-    );
-    const catchIndex = source.indexOf('} catch (error) {');
-    assert.ok(tryIndex >= 0, 'missing planner transaction try boundary');
-    assert.ok(workerStartIndex > tryIndex, 'worker construction must be fallback-protected');
-    assert.ok(catchIndex > workerStartIndex, 'worker construction must occur before catch');
+test('Cancel aborts an owned authored build and removes loading only after cleanup', async () => {
+  const container = createFakeContainer();
+  const cancellation = createOwnedDungeonBuildCancellation();
+  createDungeonAugmentationLoadingState(container, { cancellation });
+  const status = descendant(container, (element) => (
+    element.dataset?.dungeonAugmentationLoading === 'active'
+  ));
+  const retry = descendant(container, (element) => element.textContent === 'Retry');
+  const cancel = descendant(container, (element) => element.textContent === 'Cancel');
+
+  assert.ok(status);
+  assert.equal(retry.hidden, true);
+  assert.equal(cancel.hidden, false);
+  assert.equal(container.dataset.dungeonAugmentationBuild, 'active');
+  const clickPromise = cancel.click();
+  await Promise.resolve();
+  assert.equal(cancellation.signal.aborted, true);
+  assert.equal(cancel.disabled, true);
+  assert.equal(status.removed, false);
+
+  cancellation.finishCleanup();
+  await clickPromise;
+  assert.equal(status.removed, true);
+  assert.equal(Object.hasOwn(container.dataset, 'dungeonAugmentationBuild'), false);
+  assert.equal(container.attributes.has('aria-busy'), false);
+});
+
+test('loading state reports authored phases and exposes Retry on failure', () => {
+  const container = createFakeContainer();
+  const cancellation = createOwnedDungeonBuildCancellation();
+  const loadingState = createDungeonAugmentationLoadingState(container, { cancellation });
+  const status = descendant(container, (element) => (
+    element.dataset?.dungeonAugmentationLoading === 'active'
+  ));
+  const detail = descendant(status, (element) => element.tagName === 'SPAN');
+  const retry = descendant(status, (element) => element.textContent === 'Retry');
+
+  const expectedCopy = new Map([
+    ['artifact-loading', 'Verifying the authored dungeon artifact.'],
+    ['asset-preparation', 'Fetching and decoding the authored dungeon assets.'],
+    ['parent-generation', 'Constructing the authored dungeon layout.'],
+    ['validation', 'Validating traversal, progression, and presentation.'],
+    ['assembly', 'Assembling the authored dungeon render batches.'],
+    ['activation', 'Activating the authored dungeon.'],
+  ]);
+  for (const [phase, copy] of expectedCopy) {
+    loadingState.update(phase);
+    assert.equal(detail.textContent, copy);
   }
+  assert.doesNotMatch(detail.textContent, /planner|repair|worker/iu);
+
+  loadingState.fail(new Error('synthetic artifact rejection'));
+  assert.equal(status.dataset.dungeonAugmentationLoading, 'failed');
+  assert.equal(retry.hidden, false);
+  assert.equal(container.dataset.dungeonAugmentationBuild, 'failed');
+  cancellation.finishCleanup();
 });
 
-test('prepared-build diagnostics retain cumulative planner and per-repair evidence', () => {
-  const initialPrepareSource = sourceBetween(
-    'async function prepareInitialDungeonAugmentation({',
-    '\nfunction getBusterMagazineRecoveryTime(',
-  );
-  const asyncCandidateSource = sourceBetween(
-    '  async _createLegacyDungeonWorldCandidateAsync({',
-    '\n  _createLegacyDungeonWorldCandidate({',
-  );
-  const transitionDiagnosticsSource = sourceBetween(
-    '  getWorldTransitionDiagnostics() {',
-    '\n  /**\n   * Returns the small detached state needed by public-input locomotion.',
-  );
-  const loopSource = sourceBetween(
-    '  _loop() {',
-    '\n  _getPlayerGroundY() {',
-  );
-  const mountSource = sourceBetween(
-    '  _assignMountedWorldBundle(bundle, { incrementGeneration = true } = {}) {',
-    '\n  _buildWorld() {',
-  );
+test('Cancel aborts an in-flight artifact load before assets or a generator are created', async () => {
+  const events = [];
+  const container = createFakeContainer();
+  const cancellation = createOwnedDungeonBuildCancellation();
+  createDungeonAugmentationLoadingState(container, { cancellation });
+  const cancel = descendant(container, (element) => element.textContent === 'Cancel');
+  let resolveLoaderStarted;
+  const loaderStarted = new Promise((resolve) => { resolveLoaderStarted = resolve; });
 
-  for (const source of [initialPrepareSource, asyncCandidateSource]) {
-    for (const field of [
-      'totalTimeMs',
-      'workerBacked',
-      'repairCount',
-      'planningPasses',
-      'cumulativePlanningTimeMs',
-      'authoredGenerationTimeMs',
-      'replayTransactionTimeMs',
-      'assemblyCount',
-      'requestStartedAtMs',
-    ]) {
-      assert.match(source, new RegExp(`\\b${field}:`), `missing ${field}`);
+  class ForbiddenGenerator {
+    constructor() { throw new Error('generator must not be constructed'); }
+  }
+  const transactionPromise = runDungeonAugmentationGenerationTransaction({
+    ...authoredRequest,
+    signal: cancellation.signal,
+    dependencies: {
+      DungeonGenerator: ForbiddenGenerator,
+      loadAuthoredArtifact: ({ signal }) => new Promise((resolve, reject) => {
+        resolveLoaderStarted();
+        signal.addEventListener('abort', () => {
+          events.push('artifact-load-aborted');
+          const error = new Error('cancelled');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      }),
+      prepareAuthoredAssets: async () => {
+        throw new Error('asset preparation must not start');
+      },
+    },
+  }).finally(() => {
+    events.push('cleanup-finished');
+    cancellation.finishCleanup();
+  });
+
+  await loaderStarted;
+  const clickPromise = cancel.click();
+  await assert.rejects(transactionPromise, (error) => error?.name === 'AbortError');
+  await clickPromise;
+  assert.deepEqual(events, ['artifact-load-aborted', 'cleanup-finished']);
+});
+
+test('authored V4 reports fixed phases, canonicalizes the seed, and owns one-shot cleanup', async () => {
+  let generatorOptions = null;
+  let randomSeed = null;
+  let preparedAssetDisposeCount = 0;
+  let generatedDungeonDisposeCount = 0;
+  let cacheInstallCount = 0;
+  let cacheReleaseCount = 0;
+  let cacheInstalled = false;
+  const progress = [];
+  const loadingPhases = [];
+  class AuthoredGenerator {
+    constructor(options) { generatorOptions = options; }
+
+    async generateAsync(options) {
+      assert.equal(options, undefined);
+      assert.equal(cacheInstalled, true, 'decoded textures must be cached before assembly');
+      return {
+        augmentationMetrics: {
+          materializationTimeMs: 2,
+          rendererFreeValidationTimeMs: 3,
+          assemblyTimeMs: 4,
+        },
+      };
     }
-    assert.match(source, /planningPasses:[\s\S]*?\.map\(\(pass\) => \(\{ \.\.\.pass \}\)\)/);
+
+    _disposeGeneratedDungeonCandidate(dungeon) {
+      generatedDungeonDisposeCount += 1;
+      for (const resource of dungeon.disposableResources ?? []) resource.dispose?.();
+    }
   }
-  assert.match(
-    mountSource,
-    /buildDiagnostics\.activatedAtMs = activatedAtMs;[\s\S]*?buildDiagnostics\.activationTimeMs = Math\.max\(/,
+
+  const transaction = await runDungeonAugmentationGenerationTransaction({
+    ...authoredRequest,
+    loadingState: { update: (phase) => loadingPhases.push(phase) },
+    onProgress: (record) => progress.push(record.phase),
+    dependencies: {
+      DungeonGenerator: AuthoredGenerator,
+      createRandom(seed) {
+        randomSeed = seed;
+        return () => 0.5;
+      },
+      loadAuthoredArtifact: async () => authoredArtifact,
+      prepareAuthoredAssets: async () => authoredAssetPreparation({
+        onDispose: () => { preparedAssetDisposeCount += 1; },
+        onCacheInstall: () => {
+          cacheInstallCount += 1;
+          cacheInstalled = true;
+        },
+        onCacheRelease: () => {
+          cacheReleaseCount += 1;
+          cacheInstalled = false;
+        },
+      }),
+      now: (() => {
+        let value = 100;
+        return () => ++value;
+      })(),
+    },
+  });
+
+  assert.deepEqual(progress, [
+    'artifact-loading',
+    'asset-preparation',
+    'parent-generation',
+    'validation',
+  ]);
+  assert.deepEqual(loadingPhases, progress);
+  assert.equal(randomSeed, authoredArtifact.canonicalLayoutSeed);
+  assert.equal(generatorOptions.authoredAugmentationArtifact, authoredArtifact);
+  assert.equal(generatorOptions.augmentationSeed, authoredArtifact.canonicalLayoutSeed);
+  assert.equal(generatorOptions.basePlanHash, authoredArtifact.baseGeometryHash);
+  assert.equal(transaction.dungeon.layoutSeed, authoredArtifact.canonicalLayoutSeed);
+  assert.equal(transaction.dungeon.requestedLayoutSeed, authoredRequest.layoutSeed);
+  assert.equal(transaction.dungeon.preparedBuildDiagnostics.plannerWorkerCreated, false);
+  assert.equal(transaction.dungeon.preparedBuildDiagnostics.proceduralPlanningInvoked, false);
+  assert.equal(transaction.dungeon.preparedBuildDiagnostics.assetCacheHandoffCount, 1);
+  assert.deepEqual(
+    transaction.dungeon.preparedBuildDiagnostics.assetPreparationMetrics,
+    { totalTimeMs: 5, decodedTextureCount: 1, concurrency: 8 },
   );
-  assert.match(
-    mountSource,
-    /const activationProgress = bundle\.dungeonBuildActivationProgress;[\s\S]*?activationProgress\(\{\s*phase: 'activation'/,
-    'activation progress must be emitted only after the bundle is mounted',
+  assert.equal(cacheInstallCount, 1);
+  assert.equal(cacheReleaseCount, 1);
+  assert.equal(cacheInstalled, false);
+  assert.equal(
+    Object.hasOwn(transaction.dungeon.preparedBuildDiagnostics, 'workerBacked'),
+    false,
   );
-  assert.match(
-    loopSource,
-    /renderer\.render\(this\.scene, this\.camera\);[\s\S]*?buildDiagnostics\.firstPlayableFrameAtMs = firstPlayableFrameAtMs;[\s\S]*?buildDiagnostics\.gpuWarmupAndFirstRenderTimeMs = Math\.max\([\s\S]*?buildDiagnostics\.totalTimeMs = Math\.max\(/,
+  assert.equal(preparedAssetDisposeCount, 0);
+  assert.equal(transaction.disposeDungeon(), true);
+  assert.equal(transaction.disposeDungeon(), false);
+  assert.equal(generatedDungeonDisposeCount, 1);
+  await Promise.resolve();
+  assert.equal(preparedAssetDisposeCount, 1);
+});
+
+test('generator failure disposes prepared authored assets and never constructs a fallback', async () => {
+  const generatorError = new Error('synthetic authored assembly failure');
+  let generatorConstructorCount = 0;
+  let preparedAssetDisposeCount = 0;
+  class FailingGenerator {
+    constructor() { generatorConstructorCount += 1; }
+    async generateAsync() { throw generatorError; }
+  }
+
+  await assert.rejects(
+    runDungeonAugmentationGenerationTransaction({
+      ...authoredRequest,
+      dependencies: {
+        DungeonGenerator: FailingGenerator,
+        createRandom: () => () => 0.5,
+        loadAuthoredArtifact: async () => authoredArtifact,
+        prepareAuthoredAssets: async () => authoredAssetPreparation({
+          onDispose: () => { preparedAssetDisposeCount += 1; },
+        }),
+      },
+    }),
+    (error) => error === generatorError,
   );
-  assert.match(
-    transitionDiagnosticsSource,
-    /buildDiagnostics: this\.dungeon\?\.preparedBuildDiagnostics \?\? null/,
+  assert.equal(generatorConstructorCount, 1);
+  assert.equal(preparedAssetDisposeCount, 1);
+});
+
+test('aborting after detached generation disposes both the dungeon and prepared assets', async () => {
+  const controller = new AbortController();
+  let dungeonDisposed = 0;
+  let assetsDisposed = 0;
+  class AbortAfterGeneration {
+    async generateAsync() {
+      controller.abort(new Error('cancel after generation'));
+      return { detached: true };
+    }
+
+    _disposeGeneratedDungeonCandidate(dungeon) {
+      assert.equal(dungeon.detached, true);
+      dungeonDisposed += 1;
+    }
+  }
+
+  await assert.rejects(
+    runDungeonAugmentationGenerationTransaction({
+      ...authoredRequest,
+      signal: controller.signal,
+      dependencies: {
+        DungeonGenerator: AbortAfterGeneration,
+        createRandom: () => () => 0.5,
+        loadAuthoredArtifact: async () => authoredArtifact,
+        prepareAuthoredAssets: async () => authoredAssetPreparation({
+          onDispose: () => { assetsDisposed += 1; },
+        }),
+      },
+    }),
+    (error) => error?.name === 'AbortError',
   );
+  assert.equal(dungeonDisposed, 1);
+  assert.equal(assetsDisposed, 1);
+});
+
+test('artifact rejection is immediate and never constructs assets, generator, or fallback', async () => {
+  const artifactError = Object.assign(new Error('artifact integrity mismatch'), {
+    code: 'DUNGEON_AUGMENTATION_AUTHORED_ARTIFACT_INTEGRITY_MISMATCH',
+  });
+  let generatorConstructorCount = 0;
+  let assetPreparationCount = 0;
+  class ForbiddenGenerator {
+    constructor() { generatorConstructorCount += 1; }
+  }
+
+  await assert.rejects(
+    runDungeonAugmentationGenerationTransaction({
+      ...authoredRequest,
+      dependencies: {
+        DungeonGenerator: ForbiddenGenerator,
+        loadAuthoredArtifact: async () => { throw artifactError; },
+        prepareAuthoredAssets: async () => { assetPreparationCount += 1; },
+      },
+    }),
+    (error) => error === artifactError,
+  );
+  assert.equal(generatorConstructorCount, 0);
+  assert.equal(assetPreparationCount, 0);
+});
+
+test('explicit procedural V1-V3 profiles report offline-only before artifact loading', async () => {
+  for (const profileId of [
+    'industrial-supplement-preview-v1',
+    'industrial-supplement-preview-v2',
+    'industrial-supplement-preview-v3',
+  ]) {
+    let loaderCalls = 0;
+    await assert.rejects(
+      runDungeonAugmentationGenerationTransaction({
+        ...baseRequest,
+        augmentationRequest: {
+          augmentationProfileId: profileId,
+          committedAugmentationIdentity: null,
+        },
+        dependencies: {
+          loadAuthoredArtifact: async () => { loaderCalls += 1; },
+        },
+      }),
+      (error) => (
+        error?.code === 'DUNGEON_AUGMENTATION_INCOMPATIBLE_CONTENT'
+        && error?.compatibility?.status === 'legacy-profile-offline-only'
+      ),
+    );
+    assert.equal(loaderCalls, 0);
+  }
+});
+
+test('a committed procedural V4 identity is legacy offline-only even when V4 is requested', async () => {
+  await assert.rejects(
+    runDungeonAugmentationGenerationTransaction({
+      ...authoredRequest,
+      augmentationRequest: {
+        augmentationProfileId: 'industrial-supplement-preview-v4',
+        committedAugmentationIdentity: {
+          profileId: 'industrial-supplement-preview-v4',
+          generationMode: 'procedural',
+        },
+      },
+    }),
+    (error) => error?.compatibility?.status === 'legacy-profile-offline-only',
+  );
+});
+
+test('unknown augmentation profiles fail closed without invoking runtime dependencies', async () => {
+  let dependencyCalls = 0;
+  await assert.rejects(
+    runDungeonAugmentationGenerationTransaction({
+      ...baseRequest,
+      augmentationRequest: {
+        augmentationProfileId: 'test-procedural-profile',
+        committedAugmentationIdentity: null,
+      },
+      dependencies: {
+        loadAuthoredArtifact: async () => { dependencyCalls += 1; },
+        prepareAuthoredAssets: async () => { dependencyCalls += 1; },
+      },
+    }),
+    (error) => (
+      error?.code === 'DUNGEON_AUGMENTATION_INCOMPATIBLE_CONTENT'
+      && error?.compatibility?.status === 'unsupported-augmentation-profile'
+      && error?.compatibility?.errors?.[0]?.code === 'browser-procedural-planning-disabled'
+    ),
+  );
+  assert.equal(dependencyCalls, 0);
+});
+
+test('an authored V4 committed identity resolves through the artifact path without a URL profile', async () => {
+  let committedIdentitySeen = null;
+  class AuthoredCommittedGenerator {
+    constructor(options) { committedIdentitySeen = options.committedAugmentationIdentity; }
+    async generateAsync() { return { augmentationMetrics: {} }; }
+  }
+  const committedIdentity = {
+    profileId: 'industrial-supplement-preview-v4',
+    generationMode: 'authored-artifact',
+  };
+
+  const transaction = await runDungeonAugmentationGenerationTransaction({
+    ...baseRequest,
+    augmentationRequest: {
+      augmentationProfileId: null,
+      committedAugmentationIdentity: committedIdentity,
+    },
+    dependencies: {
+      DungeonGenerator: AuthoredCommittedGenerator,
+      createRandom: () => () => 0.5,
+      loadAuthoredArtifact: async () => authoredArtifact,
+      prepareAuthoredAssets: async () => authoredAssetPreparation(),
+    },
+  });
+  assert.equal(committedIdentitySeen, committedIdentity);
+  transaction.disposeDungeon();
 });

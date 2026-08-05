@@ -885,7 +885,7 @@ test('structural reductions classify before bounded rejected-pair hydration', ()
   );
   assert.match(
     plannerSource,
-    /const failedPairRejectionSummary = summarizePlacementPairRejections\([\s\S]*?const spanOnlyQualification =[\s\S]*?if \(spanOnlyQualification\) \{[\s\S]*?continue arcConsistencyPass;\s*\}\s*const rejectedPairHydrationStartedAt/,
+    /const failedPairRejectionSummary = summarizePlacementPairRejections\([\s\S]*?const spanOnlyQualification =[\s\S]*?if \(spanOnlyQualification\) \{[\s\S]*?continue arcConsistencyPass;\s*\}\s*const closestRejectedPairs = selectRouteNetworkClosestRejectedPairRecords/,
   );
   assert.match(
     plannerSource,
@@ -2099,7 +2099,7 @@ test('completed-plan memo keys isolate caller-owned maps by generation identity'
   }), key, 'unrelated-grant exclusions preserve the existing memo contract');
 });
 
-test('candidate diagnostics disable only completed-plan memoization, not salvage identity', () => {
+test('cache signatures retain an explicit disabled mode for isolated helper coverage', () => {
   const context = {
     version: 2,
     operationOrdinal: 3,
@@ -2129,30 +2129,54 @@ test('candidate diagnostics disable only completed-plan memoization, not salvage
   assert.equal(diagnostic.completedPlanMemoContextSignature, null);
 });
 
-test('route planning timing instrumentation remains outside memo eligibility', () => {
+test('route planning diagnostics cannot change memo eligibility or steer search', () => {
   const plannerSource = readFileSync(
     new URL('../src/dungeon-augmentation/planner.js', import.meta.url),
     'utf8',
   );
   const memoEligibility = plannerSource.match(
-    /const completedPlanMemoEnabled = routeNetworkPlanResultCache instanceof Map[\s\S]*?__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__ !== true;/,
+    /const completedPlanMemoEnabled = routeNetworkPlanResultCache instanceof Map;/,
   )?.[0] ?? '';
   assert.ok(memoEligibility);
   assert.doesNotMatch(
-    memoEligibility,
-    /__DUNGEON_AUGMENTATION_ROUTE_PLANNING_TIMING_SINK__/,
+    plannerSource,
+    /globalThis\.__DUNGEON_AUGMENTATION_ROUTE_|console\.error/,
   );
   assert.match(
     plannerSource,
-    /completedPlanMemoEligible: Boolean\(completedPlanMemoKey\),\s*completedPlanMemoHit,\s*physicalTimingSource: completedPlanMemoHit \? 'memoized-plan' : 'current-frame'/,
+    /completedPlanMemoEligible: Boolean\(completedPlanMemoKey\),\s*completedPlanMemoHit,\s*\.\.\.\(plannerDiagnosticSink\?\.includeTimings === true \? \{\s*timing: \{\s*physicalTimingSource: completedPlanMemoHit\s*\? 'memoized-plan'\s*: 'current-frame'/,
   );
   assert.match(
     plannerSource,
-    /try \{[\s\S]*?routePlanningTimingSink\(Object\.freeze\([\s\S]*?\}\s*catch \{\s*\/\/ Profiling must never participate in planner correctness\./,
+    /const MAX_ROUTE_NETWORK_PLANNER_OBSERVATIONS = 512;[\s\S]*?if \(emittedRecordCount >= maximumRecords\) return;[\s\S]*?sink\.observe\(Object\.freeze\([\s\S]*?\}\s*catch \{\s*\/\/ Observability is intentionally unable to participate in planning\./,
   );
   assert.match(
     plannerSource,
-    /const finalCandidateError = planned\?\.error \?\? null;[\s\S]*?rawPlanError,[\s\S]*?finalCandidateError,[\s\S]*?error: finalCandidateError/,
+    /const rawPlanError = planned\?\.error \?\? null;[\s\S]*?const candidateAttemptRecord = candidateAttemptTrace \|\| emitPlannerObservation\s*\? \{[\s\S]*?error: planned\.error \?\? null,[\s\S]*?rawPlanError,/,
+  );
+  assert.match(
+    plannerSource,
+    /const physicalPlanningStartedAt = physicalPlanningTimingsEnabled\s*\? planningNowMilliseconds\(\)\s*: 0;[\s\S]*?physicalPlanningPhaseTimings = physicalPlanningTimingsEnabled\s*\? \{/,
+  );
+  assert.match(
+    plannerSource,
+    /const plannerTelemetryAccumulator = plannerTelemetryEnabled\s*\? \{/,
+  );
+  assert.doesNotMatch(
+    plannerSource,
+    /const planningNowMilliseconds = physicalPlanningTimingsEnabled[\s\S]*?: \(\) => 0;/,
+  );
+  assert.match(
+    plannerSource,
+    /candidateAttemptRecord\.error = inactiveSocketCapValidation\.code;[\s\S]*?finalizeCandidateAttempt\?\.\(\);\s*continue;/,
+  );
+  assert.match(
+    plannerSource,
+    /candidateAttemptRecord\.error =\s*'route-network-forward-check-endpoint-domain-exhausted';[\s\S]*?finalizeCandidateAttempt\?\.\(\);\s*continue;/,
+  );
+  assert.match(
+    plannerSource,
+    /status: planned\.error \? 'failed' : 'pending',[\s\S]*?candidateAttemptRecord\.status = 'locally-valid';\s*finalizeCandidateAttempt\?\.\(\);/,
   );
   assert.doesNotMatch(plannerSource, /promotedSalvage|promotedCandidateLocalSalvage/);
 });

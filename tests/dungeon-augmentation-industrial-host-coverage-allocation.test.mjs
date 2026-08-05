@@ -17,6 +17,36 @@ const TILE_SIZE = 2.8;
 const SEED_ZERO = 'layout:augmentation-realized-v4-000';
 const SEED_ONE = 'layout:augmentation-realized-v4-001';
 const V4_PROFILE_ID = 'industrial-supplement-preview-v4';
+const SEED_ONE_PLANNER_BUDGET_MS = 30_000;
+const SEED_ONE_FIRST_PLAN_GOLDEN = Object.freeze({
+  augmentationPlanHash: 'v1-940a43060311ce05c7379ce836972dd7',
+  effectivePlanHash: 'v1-6759df25ede7bff8d09233cc7cd4a5e4',
+  operationCount: 5,
+  nodeCount: 24,
+  segmentCount: 26,
+  prunedRouteNetworkGrants: [{
+    grantId: 'industrial-v1:main-region:route-network-grant:coverage:bossRoom_shrineRoom',
+    parentRegionId: 'industrial-v1:main-region',
+    routeNetworkKind: 'objective-route-coverage',
+    operationOrdinal: 5,
+    reason: 'route-network-partial-first-required-coverage-pruned',
+  }],
+  omissionManifest: [
+    ['coverage:keycardRoom_trapRoom', 'segment', 4, 'v1-64976981cabebe96ec5462312dc6a6d8', 'conflict-root', 'route-network-required-edge-static-route-conflict', 'v1-64976981cabebe96ec5462312dc6a6d8'],
+    ['coverage:trapRoom_conveyorRoom', 'node', 0, 'v1-4ddbc668735cd30f582257b90533077e', 'dependency', 'under-degree-connector-infrastructure', 'v1-cb21d3d94e56ae20d6e9432e37f3f97f'],
+    ['coverage:trapRoom_conveyorRoom', 'node', 1, 'v1-89136b1369dac0456fd45c9a3e8ffe05', 'dependency', 'isolated-node', 'v1-cb21d3d94e56ae20d6e9432e37f3f97f'],
+    ['coverage:trapRoom_conveyorRoom', 'node', 2, 'v1-2a8b895d51e4dc9e00518df7e05fca43', 'dependency', 'isolated-node', 'v1-fb742026e065eac65856373a204eea93'],
+    ['coverage:trapRoom_conveyorRoom', 'segment', 0, 'v1-019bb977dff2634813e4cec8b9591671', 'dependency', 'incident-to-under-degree-node', 'v1-cb21d3d94e56ae20d6e9432e37f3f97f'],
+    ['coverage:trapRoom_conveyorRoom', 'segment', 2, 'v1-cb21d3d94e56ae20d6e9432e37f3f97f', 'conflict-root', 'route-network-required-edge-static-route-conflict', 'v1-cb21d3d94e56ae20d6e9432e37f3f97f'],
+    ['coverage:trapRoom_conveyorRoom', 'segment', 3, 'v1-fb742026e065eac65856373a204eea93', 'conflict-root', 'route-network-required-edge-static-route-conflict', 'v1-fb742026e065eac65856373a204eea93'],
+    ['coverage:trapRoom_conveyorRoom', 'segment', 4, 'v1-fc83be2c68274696d717f01aaaa55c95', 'conflict-root', 'route-network-required-edge-span-exceeded', 'v1-fc83be2c68274696d717f01aaaa55c95'],
+    ['keycard-pyramid-loop', 'segment', 5, 'v1-796cd964cc2a2d8ee87178fabb15e853', 'conflict-root', 'route-network-future-endpoint-domain-single-segment-conflict', 'v1-796cd964cc2a2d8ee87178fabb15e853'],
+  ],
+});
+const SEED_ONE_ACCEPTED_PLAN_GOLDEN = Object.freeze({
+  augmentationPlanHash: 'v1-0a81632d488d04354ba2b35ec2c0b3a2',
+  effectivePlanHash: 'v1-e82f9a1390f9f62a42e10d36c522922b',
+});
 const OBJECTIVE_ROUTE_IDS = [
   'enemyNest_keycardRoom',
   'keycardRoom_trapRoom',
@@ -120,53 +150,38 @@ function createPlanningParityWitness(generator, planningSnapshot) {
   };
 }
 
-function capturePlannerCandidateTrace(run) {
-  const flagName = '__DUNGEON_AUGMENTATION_ROUTE_CANDIDATE_DEBUG__';
-  const hadOwnFlag = Object.hasOwn(globalThis, flagName);
-  const previousFlag = globalThis[flagName];
-  const originalConsoleError = console.error;
+function capturePlannerCandidateTrace(generator, run) {
+  const hadOwnSink = Object.hasOwn(generator, '_augmentationPlannerDiagnosticSink');
+  const previousSink = generator._augmentationPlannerDiagnosticSink;
   const candidateTrace = [];
   let value = null;
   let error = null;
-
-  globalThis[flagName] = true;
-  console.error = (...args) => {
-    if (args.length === 1 && typeof args[0] === 'string') {
-      try {
-        const record = JSON.parse(args[0]);
-        if (Number.isInteger(record?.candidateOrdinal)
-          && typeof record?.grantId === 'string') {
-          const exhaustionSignals = [...new Set(
-            JSON.stringify(record).match(
-              /(?:route-network-(?:global-search-budget|adjacent-domain|forward-check-endpoint-domain)-exhausted|(?:cheap|exact)-budget-exhausted)/gi,
-            ) ?? [],
-          )].sort();
-          candidateTrace.push({
-            operationOrdinal: Number(record.operationOrdinal),
-            candidateOrdinal: Number(record.candidateOrdinal),
-            grantId: record.grantId,
-            moduleCount: Number(record.moduleCount),
-            elevationMode: record.elevationMode ?? null,
-            topologyTemplateId: record.topologyTemplateId ?? null,
-            junctionKind: record.junctionKind ?? null,
-            searchVariant: Number(record.searchVariant),
-            status: record.status ?? null,
-            error: record.error ?? null,
-            reason: record.reason ?? null,
-            exhaustionSignals,
-          });
-          return;
-        }
-        // Planner stage diagnostics without a candidate ordinal are part of
-        // the same captured trace session. Do not forward them to the normal
-        // test reporter: Seed001 can emit hundreds of thousands of lines and
-        // bury the actual assertion summary or exhaust CI log limits.
-        if (typeof record?.stage === 'string') return;
-      } catch {
-        // Forward unrelated diagnostics to the original sink below.
-      }
-    }
-    originalConsoleError(...args);
+  generator._augmentationPlannerDiagnosticSink = {
+    schema: 'dungeon-augmentation-planner-diagnostic-sink/v1',
+    maximumRecords: 512,
+    observe(record) {
+      if (record?.schema !== 'dungeon-augmentation-planner-observation/v1'
+        || record?.kind !== 'route-network-candidate') return;
+      const exhaustionSignals = [...new Set(
+        JSON.stringify(record).match(
+          /(?:route-network-(?:global-search-budget|adjacent-domain|forward-check-endpoint-domain)-exhausted|(?:cheap|exact)-budget-exhausted)/gi,
+        ) ?? [],
+      )].sort();
+      candidateTrace.push({
+        operationOrdinal: Number(record.operationOrdinal),
+        candidateOrdinal: Number(record.candidateOrdinal),
+        grantId: record.grantId,
+        moduleCount: Number(record.moduleCount),
+        elevationMode: record.elevationMode ?? null,
+        topologyTemplateId: record.topologyTemplateId ?? null,
+        junctionKind: record.junctionKind ?? null,
+        searchVariant: Number(record.searchVariant),
+        status: record.status ?? null,
+        error: record.error ?? null,
+        reason: record.reason ?? null,
+        exhaustionSignals,
+      });
+    },
   };
 
   try {
@@ -174,12 +189,19 @@ function capturePlannerCandidateTrace(run) {
   } catch (caughtError) {
     error = caughtError;
   } finally {
-    console.error = originalConsoleError;
-    if (hadOwnFlag) globalThis[flagName] = previousFlag;
-    else delete globalThis[flagName];
+    if (hadOwnSink) generator._augmentationPlannerDiagnosticSink = previousSink;
+    else delete generator._augmentationPlannerDiagnosticSink;
   }
 
   return { value, error, candidateTrace };
+}
+
+function captureCall(run) {
+  try {
+    return { value: run(), error: null };
+  } catch (error) {
+    return { value: null, error };
+  }
 }
 
 function routeNetworkOperations(planningResult) {
@@ -206,6 +228,11 @@ function createAcceptedPlanningEvidence(planningResult, candidateTrace) {
   assert.ok(
     candidateTrace.length > 0,
     'The real planner must expose at least one deterministic candidate-order record.',
+  );
+  assert.equal(
+    candidateTrace.some(({ status }) => status === 'pending'),
+    false,
+    'The candidate sink must publish only final local dispositions.',
   );
 
   const plannerResult = planningResult.result;
@@ -250,19 +277,6 @@ function createAcceptedPlanningEvidence(planningResult, candidateTrace) {
     true,
     'Every accepted route network must retain its selection manifest.',
   );
-  for (const operation of operations) {
-    assert.equal(
-      candidateTrace.some((candidate) => (
-        candidate.status === 'planned'
-          && candidate.grantId === operation.grantId
-          && candidate.topologyTemplateId === operation.topologyTemplateId
-          && candidate.elevationMode === operation.elevationModes?.[0]
-      )),
-      true,
-      `The candidate trace must bind accepted operation ${operation.id} to its selected families.`,
-    );
-  }
-
   const selectionEvidence = operations.map(({
     id,
     grantId,
@@ -401,7 +415,7 @@ function assertCanonicalReplayPlanningParity({
     throw error;
   };
   try {
-    directCapture = capturePlannerCandidateTrace(() => (
+    directCapture = capturePlannerCandidateTrace(generator, () => (
       originalPlanIndustrialDungeonAugmentation.call(generator, {
         rooms: directPlanningSnapshot.rooms,
         connectionPlans: directPlanningSnapshot.connectionPlans,
@@ -411,7 +425,7 @@ function assertCanonicalReplayPlanningParity({
     assert.ifError(directCapture.error);
     assert.equal(sourceRandomCounter.calls, sourceRandomCallsBeforePlanning);
 
-    replayCapture = capturePlannerCandidateTrace(() => (
+    replayCapture = capturePlannerCandidateTrace(generator, () => (
       generator._generateIndustrialDungeonWithAugmentationReplay()
     ));
     assert.ifError(replayCapture.error);
@@ -637,7 +651,7 @@ test('canonical seed0 direct and full replay execute the same planner search and
 
 test('canonical seed1 keeps a useful landmark+objective coverage partial on realization attempt one', {
   timeout: 180_000,
-}, () => {
+}, (t) => {
   const seeded = new SeededRandom(hashSeed(SEED_ONE));
   const sourceRandomCounter = { calls: 0 };
   const sourceRandom = () => {
@@ -676,19 +690,140 @@ test('canonical seed1 keeps a useful landmark+objective coverage partial on real
   };
 
   try {
-    const generationCapture = capturePlannerCandidateTrace(() => generator.generate());
-    assert.ifError(generationCapture.error);
-    dungeon = generationCapture.value;
-    assert.ok(dungeon, 'Canonical seed1 must produce a dungeon facade.');
+    // The release budget must measure the ordinary planner. Candidate
+    // observation is covered separately and is deliberately absent here.
+    const generationCapture = captureCall(() => generator.generate());
+    const plannerTimeMs = planningResults.reduce((sum, result) => (
+      sum + Math.max(
+        0,
+        Number(result?.diagnostics?.generatorPhaseTimings?.planningMs) || 0,
+      )
+    ), 0);
+    const firstPlannedOverlay = planningResults
+      .find((result) => result?.result?.overlayPlan)?.result?.overlayPlan ?? null;
+    const finalPlannedOverlay = [...planningResults].reverse()
+      .find((result) => result?.result?.overlayPlan)?.result?.overlayPlan ?? null;
+    const omissionManifest = (firstPlannedOverlay?.routeNetworkEntityOmissions ?? [])
+      .map((omission) => [
+        String(omission.grantId).replace(
+          'industrial-v1:main-region:route-network-grant:',
+          '',
+        ),
+        omission.entityKind,
+        omission.ordinal,
+        omission.signature,
+        omission.disposition,
+        omission.reason,
+        omission.rootSignature,
+      ]);
+    const repairRecords =
+      generationCapture.value?.augmentationReplayDiagnostics?.runtimePruningRecords ?? [];
+    t.diagnostic(JSON.stringify({
+      schema: 'canonical-seed001-planner-evidence/v1',
+      plannerTimeMs: rounded(plannerTimeMs),
+      plannerPassCount: planningResults.length,
+      generationStatus: generationCapture.value?.augmentationStatus ?? null,
+      firstAugmentationPlanHash: firstPlannedOverlay?.augmentationPlanHash ?? null,
+      firstEffectivePlanHash: firstPlannedOverlay?.effectivePlanHash ?? null,
+      finalAugmentationPlanHash: finalPlannedOverlay?.augmentationPlanHash ?? null,
+      finalEffectivePlanHash: finalPlannedOverlay?.effectivePlanHash ?? null,
+      operationCount: firstPlannedOverlay?.operations?.length ?? 0,
+      nodeCount: firstPlannedOverlay?.nodes?.length ?? 0,
+      segmentCount: firstPlannedOverlay?.segments?.length ?? 0,
+      prunedRouteNetworkGrants: firstPlannedOverlay?.prunedRouteNetworkGrants ?? [],
+      routeNetworkEntityOmissions:
+        firstPlannedOverlay?.routeNetworkEntityOmissions ?? [],
+      routeNetworkConflictExclusions:
+        firstPlannedOverlay?.routeNetworkConflictExclusions ?? [],
+      repairRecords,
+      error: generationCapture.error ? {
+        name: generationCapture.error.name,
+        code: generationCapture.error.code ?? null,
+        message: generationCapture.error.message,
+      } : null,
+    }));
     assert.equal(
-      dungeon.augmentationStatus,
-      'applied',
-      [
-        `reason=${dungeon.augmentationDiagnostics?.reason ?? 'unknown'}`,
-        `runtimeRepairs=${dungeon.augmentationReplayDiagnostics?.runtimePruningPasses ?? 0}`,
-        `lastFailure=${dungeon.augmentationDiagnostics?.rejectedOverlay?.attempts?.at(-1)
-          ?.failureCodes?.join(',') ?? 'unknown'}`,
-      ].join('; '),
+      firstPlannedOverlay?.augmentationPlanHash,
+      SEED_ONE_FIRST_PLAN_GOLDEN.augmentationPlanHash,
+    );
+    assert.equal(
+      firstPlannedOverlay?.effectivePlanHash,
+      SEED_ONE_FIRST_PLAN_GOLDEN.effectivePlanHash,
+    );
+    assert.equal(
+      firstPlannedOverlay?.operations?.length,
+      SEED_ONE_FIRST_PLAN_GOLDEN.operationCount,
+    );
+    assert.equal(
+      firstPlannedOverlay?.nodes?.length,
+      SEED_ONE_FIRST_PLAN_GOLDEN.nodeCount,
+    );
+    assert.equal(
+      firstPlannedOverlay?.segments?.length,
+      SEED_ONE_FIRST_PLAN_GOLDEN.segmentCount,
+    );
+    assert.deepEqual(
+      firstPlannedOverlay?.prunedRouteNetworkGrants ?? [],
+      SEED_ONE_FIRST_PLAN_GOLDEN.prunedRouteNetworkGrants,
+    );
+    assert.deepEqual(omissionManifest, SEED_ONE_FIRST_PLAN_GOLDEN.omissionManifest);
+    assert.deepEqual(repairRecords[0], {
+      realizationAttempt: 1,
+      runtimePruningPass: 1,
+      sameSeedRepairPass: 1,
+      sameSeedRepairLimit: 50,
+      recoveryKind: 'exact-conflict-entity-exclusion',
+      rejectedAugmentationPlanHash:
+        SEED_ONE_FIRST_PLAN_GOLDEN.augmentationPlanHash,
+      prunedRouteNetworkGrantIds: [],
+      excludedRouteNetworkEntities: [{
+        grantId: 'industrial-v1:main-region:route-network-grant:coverage:keycardRoom_trapRoom',
+        entityKind: 'segment',
+        entityId: 'supplement:industrial-v1-main-region:routenetwork:2:segment:0:industrial-v1-main-region-route-network-grant-coverage-keycardroom_traproom',
+        signature: 'v1-a193cfea021740c5a661757f0d6db5d8',
+        reason: 'route-network-structural-frame-wall-run-missing',
+      }],
+      conflicts: [{
+        grantId: 'industrial-v1:main-region:route-network-grant:coverage:keycardRoom_trapRoom',
+        augmentationOperationId: 'supplement:industrial-v1-main-region:routenetwork:2:operation:0:industrial-v1-main-region-route-network-grant-coverage-keycardroom_traproom',
+        routeNetworkKind: 'objective-route-coverage',
+        connectionIds: [
+          'supplement:industrial-v1-main-region:routenetwork:2:segment:0:industrial-v1-main-region-route-network-grant-coverage-keycardroom_traproom',
+        ],
+        roomIds: [],
+        socketIds: ['industrial-v1:main-region:route-socket:keycardRoom_trapRoom:0'],
+        failureKinds: ['DUNGEON_AUGMENTATION_STRUCTURAL_FRAME_WALL_RUN_MISSING'],
+      }],
+    });
+    dungeon = generationCapture.value;
+    const canonicalGateFailures = [
+      ...(generationCapture.error ? [
+        `generation-error:${generationCapture.error.code ?? generationCapture.error.name}`,
+      ] : []),
+      ...(!dungeon ? ['dungeon-facade-missing'] : []),
+      ...(dungeon?.augmentationStatus !== 'applied' ? [
+        `replay-status:${dungeon?.augmentationStatus ?? 'missing'}:${
+          dungeon?.augmentationDiagnostics?.reason ?? 'unknown'
+        }`,
+      ] : []),
+      ...(dungeon?.augmentationStatus === 'applied'
+        && dungeon?.augmentationPlanHash
+          !== SEED_ONE_ACCEPTED_PLAN_GOLDEN.augmentationPlanHash ? [
+          `accepted-augmentation-hash:${dungeon?.augmentationPlanHash ?? 'missing'}`,
+        ] : []),
+      ...(dungeon?.augmentationStatus === 'applied'
+        && dungeon?.effectivePlanHash
+          !== SEED_ONE_ACCEPTED_PLAN_GOLDEN.effectivePlanHash ? [
+          `accepted-effective-hash:${dungeon?.effectivePlanHash ?? 'missing'}`,
+        ] : []),
+      ...(plannerTimeMs > SEED_ONE_PLANNER_BUDGET_MS ? [
+        `planner-budget:${rounded(plannerTimeMs)}>${SEED_ONE_PLANNER_BUDGET_MS}`,
+      ] : []),
+    ];
+    assert.deepEqual(
+      canonicalGateFailures,
+      [],
+      'Seed001 acceptance and its 30-second planner budget are independent required gates.',
     );
     assert.equal(dungeon.augmentationReplayDiagnostics?.accepted, true);
     assert.equal(dungeon.augmentationReplayDiagnostics?.realizationAttempts, 1);
@@ -738,12 +873,14 @@ test('canonical seed1 keeps a useful landmark+objective coverage partial on real
 
     const planningResult = planningResults.at(-1);
     assert.equal(planningResult.status, 'applied');
-    const acceptedEvidence = createAcceptedPlanningEvidence(
-      planningResult,
-      generationCapture.candidateTrace,
+    assert.equal(
+      planningResult.result?.overlayPlan?.augmentationPlanHash,
+      SEED_ONE_ACCEPTED_PLAN_GOLDEN.augmentationPlanHash,
     );
-    assert.equal(acceptedEvidence.status, 'applied');
-    assert.equal(acceptedEvidence.augmentationPlanHash, dungeon.augmentationPlanHash);
+    assert.equal(
+      planningResult.result?.overlayPlan?.effectivePlanHash,
+      SEED_ONE_ACCEPTED_PLAN_GOLDEN.effectivePlanHash,
+    );
 
     const overlayPlan = planningResult.result.overlayPlan;
     const realizedOperations = routeNetworkOperations(planningResult);

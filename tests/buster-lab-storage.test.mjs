@@ -42,6 +42,22 @@ import {
   computeEffectiveDungeonPlanHash,
 } from '../src/dungeon-augmentation/validation.js';
 
+const AUTHORED_V4_LAYOUT_SEED = 'layout:industrial-v4-authored-r1';
+
+function createAuthoredV4SaveIdentity(input = {}) {
+  return createDungeonAugmentationSaveIdentity({
+    ...input,
+    generationMode: 'authored-artifact',
+    artifactId: 'industrial-v4-authored-r1',
+    artifactRevision: 1,
+    profileId: 'industrial-supplement-preview-v4',
+    profileRevision: 6,
+    gameplayTuningRevision: 1,
+    resolvedLayoutSeed: AUTHORED_V4_LAYOUT_SEED,
+    seed: AUTHORED_V4_LAYOUT_SEED,
+  });
+}
+
 class MemoryStorage {
   constructor() {
     this.values = new Map();
@@ -674,7 +690,7 @@ test('Boss Hunt locks and restarts preserve the canonical augmentation identity'
   });
   const basePlanHash = 'base-plan:persistence-test';
   const augmentationPlanHash = 'augmentation-plan:persistence-test';
-  const dungeonAugmentation = createDungeonAugmentationSaveIdentity({
+  const dungeonAugmentation = createAuthoredV4SaveIdentity({
     profileId: 'industrial-supplement-preview-v1',
     seed: 'augmentation-seed:persistence-test',
     basePlanHash,
@@ -723,7 +739,7 @@ test('active Boss Hunt persists augmentation mutable state without changing cont
   });
   const basePlanHash = 'base-plan:runtime-state';
   const augmentationPlanHash = 'augmentation-plan:runtime-state';
-  const dungeonAugmentation = createDungeonAugmentationSaveIdentity({
+  const dungeonAugmentation = createAuthoredV4SaveIdentity({
     profileId: 'industrial-supplement-preview-v4',
     seed: 'augmentation-seed:runtime-state',
     basePlanHash,
@@ -802,7 +818,7 @@ test('dungeon-content reset compare-and-swap rejects stale mutable augmentation 
   });
   const basePlanHash = 'base-plan:reset-mutable-state-cas';
   const augmentationPlanHash = 'augmentation-plan:reset-mutable-state-cas';
-  const initialIdentity = createDungeonAugmentationSaveIdentity({
+  const initialIdentity = createAuthoredV4SaveIdentity({
     profileId: 'industrial-supplement-preview-v4',
     seed: 'augmentation-seed:reset-mutable-state-cas',
     basePlanHash,
@@ -1007,7 +1023,7 @@ test('dungeon-content reset requires exact prior identity and a canonical replac
   });
   const basePlanHash = 'base-plan:content-reset';
   const augmentationPlanHash = 'augmentation-plan:content-reset';
-  const dungeonAugmentation = createDungeonAugmentationSaveIdentity({
+  const dungeonAugmentation = createAuthoredV4SaveIdentity({
     profileId: 'industrial-supplement-preview-v1',
     seed: 'augmentation-seed:content-reset',
     basePlanHash,

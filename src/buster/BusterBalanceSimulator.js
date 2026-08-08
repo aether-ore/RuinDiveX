@@ -17,6 +17,7 @@ import {
   getClusterDirections,
   getSpreadDirections,
 } from './BusterTrajectory.js';
+import { REAVERBOT_NON_BOSS_HEALTH_SCALE } from '../reaverbots/ReaverbotCatalog.js';
 
 const EPSILON = 1e-9;
 const DEFAULT_STEP = 1 / 120;
@@ -113,8 +114,8 @@ const TARGET_PROFILE_DEFINITIONS = {
   ordinary: { id: 'ordinary', label: 'Ordinary Reaverbot', baseHealth: 24, healthPerLevel: 0.16, baseArmor: 0, armorPerLevel: 0 },
   armored: { id: 'armored', label: 'Armored Reaverbot', baseHealth: 58, healthPerLevel: 0.16, baseArmor: 12, armorPerLevel: 0.08 },
   elite: { id: 'elite', label: 'Elite Reaverbot', baseHealth: 43.2, healthPerLevel: 0.18, baseArmor: 10, armorPerLevel: 0.1 },
-  medianProcedural: { id: 'medianProcedural', label: 'Median Procedural Reaverbot', baseHealth: 34, baseArmor: 8, procedural: true },
-  weakPoint: { id: 'weakPoint', label: 'Weak-point Reaverbot', baseHealth: 34, baseArmor: 8, procedural: true, weakPointMultiplier: 2.4 },
+  medianProcedural: { id: 'medianProcedural', label: 'Median Procedural Reaverbot', baseHealth: 34 * REAVERBOT_NON_BOSS_HEALTH_SCALE, baseArmor: 8, procedural: true },
+  weakPoint: { id: 'weakPoint', label: 'Weak-point Reaverbot', baseHealth: 34 * REAVERBOT_NON_BOSS_HEALTH_SCALE, baseArmor: 8, procedural: true, weakPointMultiplier: 2.4 },
 };
 
 export const BUSTER_BALANCE_TARGET_PROFILES = deepFreeze(TARGET_PROFILE_DEFINITIONS);

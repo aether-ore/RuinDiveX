@@ -6,6 +6,7 @@ import {
   REAVERBOT_CHARGE_MODULES,
   REAVERBOT_DEFENSES,
   REAVERBOT_EYE_COLOR,
+  REAVERBOT_NON_BOSS_HEALTH_SCALE,
   REAVERBOT_PALETTES,
   REAVERBOT_WEAK_POINTS,
   REAVERBOT_WEAPONS,
@@ -361,6 +362,7 @@ function createStats(archetype, body, mobility, weapon, threatTier, proportions,
   const tierHealth = 1 + (tier - 1) * 0.2;
   const tierDamage = 1 + (tier - 1) * 0.105;
   const roomHealth = clamp(context.healthMultiplier ?? 1, 0.72, 1.6);
+  const nonBossHealthScale = context.isBoss ? 1 : REAVERBOT_NON_BOSS_HEALTH_SCALE;
   const bodyScale = body.radiusScale * proportions.overallScale * (weapon.radiusScale ?? 1);
   const base = archetype.baseStats;
   const attackRange = weapon.range ?? archetype.behavior.preferredRange;
@@ -373,7 +375,14 @@ function createStats(archetype, body, mobility, weapon, threatTier, proportions,
   const recoveryDuration = weapon.recoveryDuration ?? archetype.behavior.recovery;
 
   return {
-    maxHealth: Number((base.health * tierHealth * roomHealth * 1.12 * healthScale).toFixed(3)),
+    maxHealth: Number((
+      base.health
+      * nonBossHealthScale
+      * tierHealth
+      * roomHealth
+      * 1.12
+      * healthScale
+    ).toFixed(3)),
     damage: Number((base.damage * tierDamage * (weapon.damageScale ?? 1) * 1.1).toFixed(3)),
     moveSpeed: Number((
       base.speed

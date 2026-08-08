@@ -8,6 +8,10 @@ import {
   animateReaverbotVisual,
   createReaverbotVisual,
 } from './ReaverbotVisualFactory.js';
+import {
+  REAVERBOT_DEFENSE_BREAK_HITS,
+  REAVERBOT_DEFENSE_BREAK_STUN_DURATION,
+} from './ReaverbotCatalog.js';
 import { createReaverbotSalvageProfile } from './ReaverbotSalvageCatalog.js';
 import { SeededRandom } from './SeededRandom.js';
 
@@ -307,6 +311,8 @@ export class ReaverbotEnemy extends Enemy {
     };
     this.weakPointDamage = 0;
     this.weakPointBroken = false;
+    this.defenseHitCount = 0;
+    this.defenseBroken = false;
     this.defenseDisabled = false;
     this.pendingWeakPointBreakEffect = false;
     this.affix = eliteAffix;
@@ -680,7 +686,96 @@ export class ReaverbotEnemy extends Enemy {
       this._beginWeaponizedDetonatorKnockback(meta, this._runtimeGame);
     }
 
+    this._registerDefenseIntercept(amount, meta);
+
     return dealt;
+  }
+
+  _registerDefenseIntercept(amount, meta = {}) {
+    const defense = this.genome.modules.defense;
+    const directPlayerHit = Boolean(
+      meta.projectileHit || meta.directHit || meta.directContactHit,
+    ) && this._isPlayerOwnedHit(meta);
+    const excludedDamage = Boolean(
+      meta.statusTick
+      || meta.explosionSplash
+      || meta.areaDamage
+      || meta.hazardDomain
+      || meta.environmentalDamage,
+    );
+    if (this.isBoss
+      || this._isClawCarrier()
+      || !defense
+      || this.defenseBroken
+      || this.defenseDisabled
+      || !(Number(amount) > 0)
+      || !directPlayerHit
+      || excludedDamage
+      || meta.shieldBlocked !== true
+      || meta.defensePartId !== defense.id) {
+      return false;
+    }
+
+    this.defenseHitCount = Math.min(
+      REAVERBOT_DEFENSE_BREAK_HITS,
+      this.defenseHitCount + 1,
+    );
+    meta.defenseHitRegistered = true;
+    meta.defenseHitCount = this.defenseHitCount;
+    meta.defenseHitsRemaining = Math.max(
+      0,
+      REAVERBOT_DEFENSE_BREAK_HITS - this.defenseHitCount,
+    );
+    if (this.defenseHitCount >= REAVERBOT_DEFENSE_BREAK_HITS) {
+      this._breakDefense(meta);
+    }
+    return true;
+  }
+
+  _breakDefense(meta = {}) {
+    if (this.isBoss || this.defenseBroken || !this.genome.modules.defense) return false;
+    const game = this._runtimeGame;
+    const defense = this.genome.modules.defense;
+    this.defenseBroken = true;
+    this.defenseDisabled = true;
+    this.brain.defenseActive = false;
+    this.brain.weakPointExposed = !this.weakPointBroken;
+    meta.defenseBroken = true;
+    meta.defenseHitCount = REAVERBOT_DEFENSE_BREAK_HITS;
+    meta.defenseHitsRemaining = 0;
+
+    const impactPosition = meta.hitPosition?.clone?.()
+      ?? this.visual.defense.primaryPlate?.getWorldPosition?.(new THREE.Vector3())
+      ?? this.visual.defense.group.getWorldPosition(new THREE.Vector3());
+    game?.addReaverbotDefenseBreakEffect?.(this, impactPosition);
+    this.visual.defense.group.visible = false;
+    this.visual.defense.group.userData.broken = true;
+
+    if (!this.dead) {
+      this._removeTelegraphMarker();
+      this._releaseTractorTarget('defense-break', game);
+      this._resetSpringMovementState({ cancelPounce: true });
+      game?.cancelEnemyAttackRequest?.(this);
+      game?.completeEnemyAttack?.(this);
+      game?.endFlamethrowerEffect?.(this);
+      this.clearNavigationRecoveryTarget?.();
+      this.contactRetreatMotion = null;
+      this.knockback.set(0, 0, 0);
+      this.brain.state = 'position';
+      this.brain.stateTime = 0;
+      this.brain.moving = false;
+      this.brain.speedRatio = 0;
+      this.brain.attackFired = false;
+      this.brain.attackHit = false;
+      this.brain.tractorBeamActive = false;
+      this.brain.tractorBeamIntensity = 0;
+      this.statusEffects.stagger.duration = REAVERBOT_DEFENSE_BREAK_STUN_DURATION;
+    }
+
+    game?.addParticleBurst?.(impactPosition, this.genome.palette.emissive, 18, 0.13);
+    game?.addHitEffect?.(impactPosition, 0xffd36f, 0.9, { absolute: true });
+    game?.ui?.showToast?.(`${defense.label} shattered — weak point exposed`, '#ffd36f');
+    return true;
   }
 
   _beginRedEyeRefocus(meta = {}, game = this._runtimeGame) {
@@ -1717,7 +1812,7 @@ export class ReaverbotEnemy extends Enemy {
       this.visual.weakPoint.core.getWorldPosition(tempA);
       game.addParticleBurst(tempA, this.genome.palette.emissive, 22, 0.14);
       game.addHitEffect(tempA, this.genome.palette.emissive, 0.85, { absolute: true });
-      game.ui?.showToast?.(`${this.genome.modules.weakPoint.label} ruptured — defense disabled`, '#ffd36f');
+      game.ui?.showToast?.(`${this.genome.modules.weakPoint.label} ruptured`, '#ffd36f');
     }
 
     if (brain.detonatorKnockback) {
@@ -4856,7 +4951,8 @@ export class ReaverbotEnemy extends Enemy {
       ? clamp01(brain.stateTime / Math.max(0.01, this._getStateDuration('telegraph')))
       : 1;
     const eyelidsCleared = eyelidOpeningProgress >= 0.24;
-    brain.weakPointExposed = this.weakPointBroken
+    brain.weakPointExposed = this.defenseBroken
+      || this.weakPointBroken
       || (linkedRotorCore
         ? Math.cos(this.visual.defense.group.rotation.y) < -0.05
         : exposure === 'always'
@@ -5004,7 +5100,6 @@ export class ReaverbotEnemy extends Enemy {
 
   _breakWeakPoint(meta) {
     this.weakPointBroken = true;
-    this.defenseDisabled = true;
     this.pendingWeakPointBreakEffect = true;
     meta.weakPointBroken = true;
     this.stats.armor *= 0.55;

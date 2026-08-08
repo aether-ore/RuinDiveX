@@ -1,4 +1,8 @@
 export const REAVERBOT_EYE_COLOR = 0xff254f;
+export const REAVERBOT_NON_BOSS_HEALTH_SCALE = 0.65;
+export const REAVERBOT_DEFENSE_BREAK_HITS = 3;
+export const REAVERBOT_DEFENSE_BREAK_STUN_DURATION = 2;
+export const REAVERBOT_DEFENSE_BREAK_DEBRIS_LIFE = 1.15;
 
 export const REAVERBOT_ARCHETYPES = Object.freeze({
   pursuer: {

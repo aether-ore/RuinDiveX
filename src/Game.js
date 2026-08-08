@@ -104,6 +104,7 @@ import {
   REAVERBOT_SALVAGE_MATERIALS,
   rollReaverbotSalvageDrops,
 } from './reaverbots/ReaverbotSalvageCatalog.js';
+import { REAVERBOT_DEFENSE_BREAK_DEBRIS_LIFE } from './reaverbots/ReaverbotCatalog.js';
 import {
   BOSS_EXPEDITION_SCHEMA_VERSION,
   DEFAULT_BOSS_PROFILE_ID,
@@ -10424,6 +10425,120 @@ export class Game {
     return clone;
   }
 
+  _collectReaverbotDefensePartMeshes(enemy, limit = 4) {
+    const defense = enemy?.visual?.defense;
+    if (!defense?.group) return [];
+    const sources = [];
+    const chosen = new Set();
+    const addSource = (object) => {
+      if (!object?.isMesh
+        || !object.geometry
+        || object.isSkinnedMesh
+        || chosen.has(object)
+        || object.visible === false
+        || sources.length >= limit) {
+        return;
+      }
+      chosen.add(object);
+      sources.push(object);
+    };
+
+    for (const object of [
+      ...(defense.shutters ?? []),
+      ...(defense.plates ?? []),
+      defense.shell,
+      defense.primaryPlate,
+    ]) {
+      addSource(object);
+    }
+    defense.group.traverse(addSource);
+    return sources;
+  }
+
+  _cloneReaverbotDefensePartMesh(source, index) {
+    if (!source?.geometry || source.isSkinnedMesh) return null;
+    const sourceMaterials = Array.isArray(source.material) ? source.material : [source.material];
+    const materials = sourceMaterials.map((material) => {
+      const clone = material?.clone?.();
+      if (!clone) return null;
+      clone.transparent = true;
+      clone.depthWrite = false;
+      clone.opacity = material.opacity ?? 1;
+      clone.userData = {
+        ...clone.userData,
+        enemyDeathBaseOpacity: clone.opacity,
+      };
+      return clone;
+    });
+    const material = Array.isArray(source.material) ? materials : materials[0];
+    if (!material || (Array.isArray(material) && materials.every((entry) => !entry))) return null;
+
+    const clone = new THREE.Mesh(source.geometry.clone(), material);
+    source.updateWorldMatrix(true, false);
+    source.matrixWorld.decompose(clone.position, clone.quaternion, clone.scale);
+    clone.name = `reaverbotDefensePart_${source.name || index}`;
+    clone.castShadow = false;
+    clone.receiveShadow = false;
+    clone.renderOrder = source.renderOrder;
+    clone.userData = {
+      reaverbotDefensePart: true,
+      sourceName: source.name || `part-${index}`,
+    };
+    return clone;
+  }
+
+  addReaverbotDefenseBreakEffect(enemy, impactPosition = null) {
+    if (!enemy?.visual?.defense?.group || !this.scene) return false;
+    enemy.root.updateWorldMatrix(true, true);
+    const sources = this._collectReaverbotDefensePartMeshes(enemy, 4);
+    if (sources.length === 0) return false;
+
+    const center = impactPosition?.clone?.()
+      ?? enemy.visual.defense.group.getWorldPosition(new THREE.Vector3());
+    const debrisGroup = new THREE.Group();
+    debrisGroup.name = 'reaverbotDefenseParts';
+    const parts = [];
+    for (let index = 0; index < sources.length; index += 1) {
+      const object = this._cloneReaverbotDefensePartMesh(sources[index], index);
+      if (!object) continue;
+      debrisGroup.add(object);
+      const outward = object.position.clone().sub(center);
+      outward.y = Math.max(0.22, Math.abs(outward.y) * 0.45);
+      if (outward.lengthSq() < 0.001) {
+        const angle = index * 2.39996;
+        outward.set(Math.cos(angle), 0.32, Math.sin(angle));
+      }
+      outward.normalize();
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      parts.push({
+        object,
+        materials: materials.filter(Boolean),
+        velocity: outward.multiplyScalar(1.65 + Math.random() * 1.05)
+          .add(new THREE.Vector3(0, 0.9 + Math.random() * 0.7, 0)),
+        angularVelocity: new THREE.Vector3(
+          (Math.random() - 0.5) * 9,
+          (Math.random() - 0.5) * 12,
+          (Math.random() - 0.5) * 9,
+        ),
+        bounces: 0,
+      });
+    }
+    if (parts.length === 0) return false;
+
+    const floorY = this.dungeonController?.getSurfaceElevationAt?.(enemy.root.position)
+      ?? enemy.root.position.y;
+    this.scene.add(debrisGroup);
+    this.timedEffects.push({
+      kind: 'reaverbotDefenseParts',
+      object: debrisGroup,
+      parts,
+      floorY,
+      life: REAVERBOT_DEFENSE_BREAK_DEBRIS_LIFE,
+      maxLife: REAVERBOT_DEFENSE_BREAK_DEBRIS_LIFE,
+    });
+    return true;
+  }
+
   _createEnemyDeathProxyPart(enemy, center, size, index) {
     const primaryColor = enemy.genome?.palette?.primary ?? enemy.type?.skinColor ?? 0x8d9382;
     const secondaryColor = enemy.genome?.palette?.secondary ?? enemy.type?.clothColor ?? 0x4f5548;
@@ -14209,7 +14324,7 @@ export class Game {
 
       if (effect.object?.userData?.explosionVisual === 'fierySphere') {
         this._updateFieryExplosionEffect(effect, dt, progress);
-      } else if (effect.kind === 'enemyDeathParts') {
+      } else if (effect.kind === 'enemyDeathParts' || effect.kind === 'reaverbotDefenseParts') {
         this._updateEnemyDeathPartsEffect(effect, dt, progress);
       } else if (effect.kind === 'bossRecoveryPresentation') {
         const age = 1 - progress;

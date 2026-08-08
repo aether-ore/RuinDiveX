@@ -14,6 +14,7 @@ import {
   REAVERBOT_CHARGE_MODULES,
   REAVERBOT_DEFENSES,
   REAVERBOT_EYE_COLOR,
+  REAVERBOT_NON_BOSS_HEALTH_SCALE,
   REAVERBOT_WEAK_POINTS,
   REAVERBOT_WEAPONS,
 } from '../src/reaverbots/ReaverbotCatalog.js';
@@ -43,6 +44,46 @@ test('the same seed and context reproduce the same Reaverbot genome', () => {
     behaviorModifiers: ['aggressive pack'],
   };
   assert.deepEqual(generateReaverbotGenome(options), generateReaverbotGenome(options));
+});
+
+test('generated non-boss health uses the shared 35 percent reduction while bosses keep full health', () => {
+  const expectedHealth = (genome, { roomHealth = 1, boss = false } = {}) => {
+    const base = REAVERBOT_ARCHETYPES[genome.archetypeId].baseStats.health;
+    const tierHealth = 1 + (genome.threatTier - 1) * 0.2;
+    const weapon = genome.modules.weapon;
+    const healthScale = weapon.healthScale ?? (weapon.tags.includes('melee') ? 1.15 : 1);
+    return Number((
+      base
+      * (boss ? 1 : REAVERBOT_NON_BOSS_HEALTH_SCALE)
+      * tierHealth
+      * roomHealth
+      * 1.12
+      * healthScale
+    ).toFixed(3));
+  };
+  const ordinary = generateReaverbotGenome({
+    seed: 'health-scale:ordinary',
+    archetypeId: 'shieldSentinel',
+    threatTier: 3,
+    healthMultiplier: 1.2,
+  });
+  const keycard = generateReaverbotGenome({
+    seed: 'health-scale:keycard',
+    archetypeId: 'pursuer',
+    threatTier: 2,
+    keycardCarrier: true,
+  });
+  const boss = generateReaverbotGenome({
+    seed: 'health-scale:boss',
+    archetypeId: 'shieldSentinel',
+    threatTier: 3,
+    healthMultiplier: 1.2,
+    isBoss: true,
+  });
+
+  assert.equal(ordinary.stats.maxHealth, expectedHealth(ordinary, { roomHealth: 1.2 }));
+  assert.equal(keycard.stats.maxHealth, expectedHealth(keycard));
+  assert.equal(boss.stats.maxHealth, expectedHealth(boss, { roomHealth: 1.2, boss: true }));
 });
 
 test('body defense normalization preserves legacy candidate silhouettes and validates in two stages', () => {
@@ -482,7 +523,7 @@ test('close-range Reaverbots use the harder long-tracking combat profile', () =>
   assert.ok(pouncer.behavior.aggroRange >= 24);
   assert.ok(charger.behavior.aggroRange >= 26);
   assert.ok(melee.behavior.aggroRange >= 22);
-  assert.ok(pouncer.stats.maxHealth > 29);
+  assert.ok(pouncer.stats.maxHealth > 29 * REAVERBOT_NON_BOSS_HEALTH_SCALE);
   assert.ok(pouncer.stats.damage > 10);
   assert.ok(pouncer.stats.attackCooldown < 2.5);
 });
@@ -734,7 +775,10 @@ test('revamped melee modules are armored, deterministic, and body-plan compatibl
 
       meleeCount += 1;
       assert.ok(genome.stats.armor >= 20, `${weapon.id} must retain meaningful armor after ordinary armor pierce`);
-      assert.ok(genome.stats.maxHealth > REAVERBOT_ARCHETYPES[archetypeId].baseStats.health);
+      assert.ok(
+        genome.stats.maxHealth
+          > REAVERBOT_ARCHETYPES[archetypeId].baseStats.health * REAVERBOT_NON_BOSS_HEALTH_SCALE,
+      );
 
       if (weapon.id === 'crusherJaw') {
         jawCount += 1;
